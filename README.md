@@ -22,6 +22,16 @@ npm test
 npx tsc
 ```
 
+### Providers: settings per machine
+
+A CLI that is not on PATH can be given a full path, and each CLI can have a list of model ids you keep yourself (offered when an agent is set up). These describe the computer, not the project, so they live outside `.warband/`, in `providers.json` in the window's settings folder: `%APPDATA%\Warband` on Windows, `~/Library/Application Support/Warband` on macOS, `$XDG_CONFIG_HOME/Warband` (or `~/.config/Warband`) elsewhere. `WARBAND_CONFIG_DIR` overrides it.
+
+```json
+{ "providers": { "antigravity": { "binary": "C:/Users/me/AppData/Local/agy/bin/agy.exe", "models": ["gemini-3-pro"] } } }
+```
+
+`warband doctor`, `warband run`, `warband agent new`, `npm run spike` and the window all launch the binary set there. The file holds no keys or logins. Edit it in the window (**Провайдеры**) or by hand. A new CLI cannot be added there: it needs an adapter in code, see [Adding a runner](docs/runners.md#adding-a-runner).
+
 ## Agents
 
 An agent is a reusable task such as `/test`:
@@ -90,12 +100,13 @@ warband ui     # from the project folder; builds the window on first use
 
 The same runs, in a desktop window (Electron, see [ADR-0002](docs/adr/0002-desktop-window.md)):
 
-- On the left: the project, **New task**, runs waiting for you at a gate, and the history by day. Ctrl+B hides the panel.
+- On the left: the project, **New task**, the **Setup** section (Настройка), runs waiting for you at a gate, and the history by day. Ctrl+B hides the panel.
+- **Providers** (Провайдеры), under Setup, is about this machine rather than the project. There is a card for each CLI Warband has an adapter for. Each card shows whether the CLI is installed, its version, whether the adapter is verified, what is known about its sandbox and headless approvals, and the login state. The login state is shown only when the CLI reports it itself (`claude auth status`); otherwise it reads "unknown". The card's section of `docs/runners.md` opens in place. The path to the binary and the model list are edited there, with the same validation as the core. A settings form warns before you leave with unsaved edits, and if `providers.json` changes on disk while you edit, it says so instead of writing over it. **Проверить** runs the `scripts/spike` probes on that CLI after a warning that they are real model calls and spend subscription quota, and shows their results in a table. The results do not change `verified`, which stays in code.
 - A run has a header with its status, branch and actions (cancel, open the worktree, merge into your branch when it is done), and four tabs: **Timeline** (a bar per stage visit, reworks included), **Log** (agent tool calls and text, hooks, decisions), **Checks** (hook output) and **Review plans**.
 - At a gate the run shows the plan, the questions or the change. At acceptance there is a side-by-side diff (Monaco), the reviewer's findings pinned to their lines, and your own comments: click a line number. Comments go back to the implementer as a review plan.
 - A notification appears when a gate opens and the window is not in focus.
 
-`npm run dev -w @warband/app` runs the window with hot reload. `WARBAND_SCREENSHOT=<file.png>` saves what the window shows after start and quits, and `WARBAND_OPEN_RUN=<run id>` opens a run's page.
+`npm run dev -w @warband/app` runs the window with hot reload. `WARBAND_SCREENSHOT=<file.png>` saves what the window shows after start and quits. `WARBAND_OPEN_RUN=<run id>` opens a run's page, and `WARBAND_OPEN_VIEW=providers` opens the Providers screen.
 
 ## reslop
 

@@ -37,10 +37,11 @@ One workflow for a coding task, whichever agent CLIs the team has: clarify, plan
 | reslop | Hooks marked `reduce` run through `reslop t`. Reviewer findings and line comments become `.plan/*.md` in reslop's format. Acceptance can open reslop, and its plans go back to the implementer. `.plan/` and `.log/` are archived, never committed | `src/engine/plan-file.ts`, `src/engine/run.ts` |
 | Window | `warband ui`: the run list with runs waiting for you, a timeline, the log, checks, review plans, gates with a Monaco diff and line comments, merge, notifications | `app/`, [ADR-0002](adr/0002-desktop-window.md) |
 | PATH | `npm install` runs `npm link` | `scripts/link.ts` |
+| Providers (per machine) | `providers.json` in the app settings folder: a binary path per CLI and a model list kept by hand. The engine, `doctor`, the wizard and the spike use the path. The window's **Провайдеры** screen shows each CLI's state, adapter, sandbox, approvals and login state (only as the CLI reports it), edits the settings with the core's validation, and runs the spike probes after a quota warning | `src/core/providers.ts`, `src/runners/registry.ts`, `app/src/main/providers.ts`, `app/src/renderer/Providers.tsx` |
 
 ## How it was checked
 
-- 100 tests on `node:test`. The engine and the window's run manager run against real git repositories with scripted agents. `tsc` is clean for the core and the app.
+- 127 tests on `node:test`. The engine and the window's run manager run against real git repositories with scripted agents. The providers settings and the Providers screen's service run against temporary settings folders with scripted CLIs and probes. `tsc` is clean for the core and the app.
 - Isolation probes on Claude Code 2.1.325 (docs/runners.md):
   - **before** the tool restriction, a shell `cat ../file` in read mode and a `Write` outside cwd in edit mode were both denied by Claude Code's own path check;
   - **after** it, read and grep outside cwd, a committed `.claude/settings.json` that allows the parent, and a write outside cwd were all denied as well;
@@ -68,17 +69,14 @@ One workflow for a coding task, whichever agent CLIs the team has: clarify, plan
 - **Protected paths are flagged, not enforced.** The reviewer and the person see the list, but a run that weakens a check is not stopped by Warband. The checks themselves run the project's scripts with the person's rights.
 - **Fenced prompts are a convention, not a guarantee.** Tests check that the prompt is assembled correctly, with untrusted material inside blocks it cannot close (`src/engine/prompts.test.ts`, with an injection fixture). Whether a model follows the instruction not to obey text inside the blocks no test can show.
 - Runs live in the process that started them. Closing the window stops them, after a confirmation.
-- Agents, skills and hooks are created in the terminal; the window only shows them.
+- Agents, skills and hooks are created in the terminal; the window only shows them. Project setup in the window is being built in stages; the first, **Providers**, is done.
+- Login state is known only for Claude Code. `agy` has no status command, and Codex and Kimi were not tried.
 - Opening reslop in an external terminal from the window was not tried by hand, and launching a terminal on macOS or Linux is untested.
 
 ## Next
 
 1. **Agent and hook editor in the window.** Create and edit agents (description, skills, hooks, implementer and reviewer models), skills (a Markdown editor) and hooks (command, stage, `env`, `reduce`, a test run with output), with the same validation as the wizard.
-2. **Providers in the window, with a proxy per provider.** A screen per CLI shows whether it is installed, its version and whether its adapter is verified, and lets you choose a proxy per provider: none, the system proxy, or address, port, user and password.
-   - Login state comes only from asking the CLI itself (ADR-0001).
-   - The proxy password is kept in the OS keychain (Electron `safeStorage` or Windows Credential Manager), never in `.warband/`.
-   - The CLI gets the proxy as `HTTP(S)_PROXY` in its environment. A local forwarding proxy can carry the authentication, so that no password appears in a child's environment.
-   - The first user of this is `agy`, which today needs the `withproxy` wrapper.
+2. **A proxy per provider.** The Providers screen is built, without proxies, which were left out on purpose for now. If they come back: none, the system proxy, or an address with a user and password kept in the OS keychain, never in `.warband/`, passed to the CLI as `HTTP(S)_PROXY`. The first user would be `agy`, which today needs the `withproxy` wrapper.
 3. **[Harbor](https://github.com/harbor-framework/harbor) integration.** Harbor is a Python framework, from the authors of Terminal-Bench, for evaluating agents. A task is a directory with `instruction.md`, `task.toml`, an `environment/` (a Dockerfile) and `tests/test.sh`, which writes a reward. Harbor runs trials in parallel in Docker or cloud sandboxes and already ships `claude-code`, `codex`, `kimi-code` and `antigravity-cli` agents. Two uses for Warband:
    - **Measure Warband's agents.** Run a dataset with a Warband agent as a Harbor custom agent (`BaseAgent`, whose loop runs outside the sandbox and acts through `environment.exec`). This compares role setups such as sonnet+opus against opus alone, or skills against no skills, on the same tasks, by reward.
    - **Turn Teamer tasks into Harbor tasks.** A finished run already has the instruction, the repository at its base commit and the checks, which together make a regression set for agents.

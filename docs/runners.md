@@ -120,6 +120,14 @@ The GLM coding plan is used through Claude Code by pointing that CLI at a differ
 
 Tests run the mappers over fixtures in `src/runners/events/fixtures/`. These are real spike logs passed through `scripts/spike/fixture.ts`, which replaces ids, paths and per-account data.
 
+## Settings per machine and probes from the window
+
+`providers.json` in the machine settings folder (see the README, "Providers") can give a CLI's binary as a full path and keep a list of model ids. `createRunners` in `src/runners/registry.ts` builds the runners with that path, and `warband doctor`, `warband run`, `npm run spike` and the window all use it. A path must be absolute and must point to a file. On Windows it must not be a `.cmd`, `.bat` or `.ps1`, because agent CLIs are launched without a shell. A model id must not start with a dash, because it is passed as the argument after `--model`.
+
+The window's **Проверить** runs the probes in `scripts/spike/probes.ts`, one after another, on one CLI at a time. It writes no logs: for raw output, run `npm run spike`. The results never change `verified`.
+
+Login state comes only from the CLI itself. Claude Code reports it with `claude auth status --json` (2.1.325). Warband keeps only `loggedIn` and `authMethod` from that output and drops the account fields. `agy` 1.5.9 has no such command in `--help`, so its state is shown as unknown. Codex and Kimi have not been tried.
+
 ## Adding a runner
 
 1. Add a spec to `src/runners/registry.ts` with `verified: false`.
