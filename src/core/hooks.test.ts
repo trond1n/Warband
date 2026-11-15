@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { expandRun, runHook, validateHook } from './hooks.ts';
+import { checkHook, expandRun, runHook, validateHook } from './hooks.ts';
 import type { Hook } from './hooks.ts';
 
 const node = (script: string): string => `"${process.execPath}" -e "${script}"`;
@@ -49,4 +49,15 @@ test('hook validation: names, empty commands, stages and policy', () => {
   assert.match(validateHook(hook('  '), '/work')[0] ?? '', /no command/);
   assert.match(validateHook(hook('rm -rf /'), '/work')[0] ?? '', /denied by policy/);
   assert.match(validateHook(hook('x', { stage: 'review' as Hook['stage'] }), '/work')[0] ?? '', /unknown stage/);
+});
+
+test('hook problems carry a code and field for the window, with the wizard text as message', () => {
+  assert.deepEqual(
+    checkHook(hook('rm -rf /', { name: 'x', env: { NX_DAEMON: 'false', 'BAD-NAME': '1' } }), '/work').map((p) => [p.field, p.code, p.rule ?? p.key]),
+    [
+      ['run', 'run-denied', 'shell.rm-recursive-force'],
+      ['env', 'env-name-invalid', 'BAD-NAME'],
+    ],
+  );
+  assert.deepEqual(validateHook(hook('git push --force', { name: 'x' }), '/work'), checkHook(hook('git push --force', { name: 'x' }), '/work').map((p) => p.message));
 });

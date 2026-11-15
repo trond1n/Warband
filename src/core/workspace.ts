@@ -1,10 +1,11 @@
+import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { normalizeName } from './agents.ts';
 import type { AgentDefinition, Skill } from './agents.ts';
-import { HOOK_STAGES } from './hooks.ts';
-import type { Hook } from './hooks.ts';
+import { checkHook, HOOK_STAGES } from './hooks.ts';
+import type { Hook, HookProblem, HookStage } from './hooks.ts';
 import { DEFAULT_PROTECTED, DEFAULT_TESTS } from './protected.ts';
 import type { ProtectedRules } from './protected.ts';
 import { KNOWN_RUNNER_IDS as RUNNER_IDS } from './runner.ts';
@@ -15,7 +16,7 @@ import { KNOWN_RUNNER_IDS as RUNNER_IDS } from './runner.ts';
  *
  *   .warband/agents/<name>.json   agent definitions
  *   .warband/skills/<name>.md     skills: front matter (name, description) + rules
- *   .warband/hooks.json           { "hooks": [ { name, description, run, stage } ] }
+ *   .warband/hooks.json           { "hooks": [ { name, description, run, stage, env?, reduce? } ] }
  *   .warband/protected.json       { "paths": [...], "tests": [...], "defaults": true }
  *
  * Nothing secret belongs here.
@@ -104,13 +105,34 @@ export async function saveAgent(root: string, agent: AgentDefinition): Promise<s
 }
 
 export async function loadHooks(root: string): Promise<Hook[]> {
-  let data: unknown;
+  return (await readHooks(root)).hooks;
+}
+
+export interface HooksSnapshot {
+  hooks: Hook[];
+  /** Hash of hooks.json, 'none' when there is none; pass it back to `saveHook` and `deleteHook`. */
+  version: string;
+}
+
+/** hooks.json with a version, so a save can tell that the file changed under it. */
+export async function readHooks(root: string): Promise<HooksSnapshot> {
+  let text: string;
   try {
-    data = await readJson(hooksFile(root));
+    text = await readFile(hooksFile(root), 'utf8');
   } catch (err) {
-    if (isMissing(err)) return [];
+    if (isMissing(err)) return { hooks: [], version: 'none' };
     throw err;
   }
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`${hooksFile(root)} is not valid JSON: ${(err as Error).message}`);
+  }
+  return { hooks: parseHooks(data, root), version: createHash('sha256').update(text).digest('hex').slice(0, 16) };
+}
+
+function parseHooks(data: unknown, root: string): Hook[] {
   const list = isObject(data) ? data['hooks'] : undefined;
   if (!Array.isArray(list)) throw new Error(`${hooksFile(root)}: expected { "hooks": [...] }`);
   return list.map((item, i) => {
@@ -166,6 +188,129 @@ export async function loadProtected(root: string): Promise<ProtectedRules> {
 export async function saveHooks(root: string, hooks: readonly Hook[]): Promise<void> {
   await mkdir(warbandDir(root), { recursive: true });
   await writeFile(hooksFile(root), `${JSON.stringify({ hooks }, null, 2)}\n`);
+}
+
+/** What a person fills in for a hook: environment variables as rows, which may repeat or be blank. */
+export interface HookInput {
+  name: string;
+  description: string;
+  run: string;
+  stage: string;
+  env: readonly (readonly [string, string])[];
+  reduce: boolean;
+}
+
+/**
+ * The hook as `saveHooks` writes it, the same shape and key order as a hook
+ * made by `warband agent new`: no `env` when there are no variables, and
+ * `reduce` only when it is on. Rows with neither a name nor a value are
+ * dropped; a repeated name is a problem rather than a silent overwrite.
+ */
+export function hookFromInput(input: HookInput, workspace: string): { hook: Hook; problems: HookProblem[] } {
+  const rows = input.env.map(([k, v]) => [k.trim(), v] as const).filter(([k, v]) => k !== '' || v.trim() !== '');
+  const env: Record<string, string> = {};
+  const problems: HookProblem[] = [];
+  for (const [key, value] of rows) {
+    if (Object.hasOwn(env, key)) {
+      if (!problems.some((p) => p.key === key)) {
+        problems.push({ field: 'env', code: 'env-name-duplicate', key, message: `environment variable "${key}" is listed twice` });
+      }
+      continue;
+    }
+    env[key] = value;
+  }
+  const hook: Hook = {
+    name: normalizeName(input.name),
+    description: input.description.trim(),
+    run: input.run.trim(),
+    stage: input.stage as HookStage,
+    ...(rows.length > 0 ? { env } : {}),
+    ...(input.reduce ? { reduce: true } : {}),
+  };
+  return { hook, problems: [...checkHook(hook, workspace), ...problems] };
+}
+
+/** hooks.json changed on disk after the caller read it. */
+export class HooksChangedError extends Error {
+  readonly code = 'changed';
+  constructor() {
+    super('hooks.json changed on disk since it was read');
+  }
+}
+
+/** Thrown with the problems when the hook is not valid; nothing is written. */
+export class HookInvalidError extends Error {
+  readonly code = 'invalid';
+  readonly problems: HookProblem[];
+  constructor(problems: HookProblem[]) {
+    super(problems.map((p) => p.message).join('; '));
+    this.problems = problems;
+  }
+}
+
+/** The hook is used by agents, so it is not deleted. */
+export class HookInUseError extends Error {
+  readonly code = 'in-use';
+  readonly agents: string[];
+  constructor(name: string, agents: string[]) {
+    super(`hook "${name}" is used by ${agents.map((a) => `/${a}`).join(', ')}`);
+    this.agents = agents;
+  }
+}
+
+/** Names of the agents whose hook list has `name`. */
+export async function hookUsers(root: string, name: string): Promise<string[]> {
+  return (await listAgents(root)).filter((a) => a.hooks.includes(name)).map((a) => a.name);
+}
+
+export interface SaveHookOptions {
+  /** The name the hook had when the form opened; absent for a new hook. */
+  original?: string;
+  /** From `readHooks`; a file that changed since is not written over. */
+  expectedVersion?: string;
+}
+
+/**
+ * Creates or updates one hook in hooks.json, keeping the others and their
+ * order. A new name must be free. A hook that agents use keeps its name:
+ * renaming it would leave those agents pointing at nothing.
+ */
+export async function saveHook(root: string, input: HookInput, options: SaveHookOptions = {}): Promise<HooksSnapshot & { hook: Hook }> {
+  const { hook, problems } = hookFromInput(input, root);
+  const { hooks, version } = await readHooks(root);
+  const { original } = options;
+  if (options.expectedVersion !== undefined && version !== options.expectedVersion) throw new HooksChangedError();
+  // The hook being edited was removed or renamed elsewhere.
+  if (original !== undefined && !hooks.some((h) => h.name === original)) throw new HooksChangedError();
+  if (hook.name !== original && hooks.some((h) => h.name === hook.name)) {
+    problems.unshift({ field: 'name', code: 'name-taken', message: `hook "${hook.name}" already exists` });
+  }
+  if (original !== undefined && hook.name !== original) {
+    const agents = await hookUsers(root, original);
+    if (agents.length > 0) {
+      problems.unshift({
+        field: 'name',
+        code: 'rename-in-use',
+        agents,
+        message: `hook "${original}" is used by ${agents.map((a) => `/${a}`).join(', ')}, so it keeps its name`,
+      });
+    }
+  }
+  if (problems.length > 0) throw new HookInvalidError(problems);
+  const next = original === undefined ? [...hooks, hook] : hooks.map((h) => (h.name === original ? hook : h));
+  await saveHooks(root, next);
+  return { ...(await readHooks(root)), hook };
+}
+
+/** Removes one hook. Refused while an agent uses it, or when the file changed since `expectedVersion`. */
+export async function deleteHook(root: string, name: string, expectedVersion?: string): Promise<HooksSnapshot> {
+  const { hooks, version } = await readHooks(root);
+  if (expectedVersion !== undefined && version !== expectedVersion) throw new HooksChangedError();
+  if (!hooks.some((h) => h.name === name)) throw new HooksChangedError();
+  const agents = await hookUsers(root, name);
+  if (agents.length > 0) throw new HookInUseError(name, agents);
+  await saveHooks(root, hooks.filter((h) => h.name !== name));
+  return readHooks(root);
 }
 
 /** Reads `name` and `description` from simple `key: value` front matter. */

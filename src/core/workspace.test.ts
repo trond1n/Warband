@@ -8,15 +8,24 @@ import { normalizeName, validateAgent } from './agents.ts';
 import type { AgentDefinition } from './agents.ts';
 import {
   createSkill,
+  deleteHook,
+  HookInUseError,
+  HookInvalidError,
+  HooksChangedError,
+  hookFromInput,
+  hookUsers,
   listAgents,
   listSkills,
   loadAgent,
   loadHooks,
   parseFrontMatter,
+  readHooks,
   saveAgent,
+  saveHook,
   saveHooks,
   warbandDir,
 } from './workspace.ts';
+import type { HookInput, HooksSnapshot } from './workspace.ts';
 
 const roots: string[] = [];
 const project = async (): Promise<string> => {
@@ -92,4 +101,119 @@ test('agent validation names every missing part', () => {
 test('front matter parsing tolerates CRLF and missing fields', () => {
   assert.deepEqual(parseFrontMatter('---\r\nname: a\r\ndescription: b c\r\n---\r\nbody'), { name: 'a', description: 'b c' });
   assert.deepEqual(parseFrontMatter('no front matter'), {});
+});
+
+/* Hooks edited one at a time, as the window does. */
+
+const input = (fields: Partial<HookInput> = {}): HookInput => ({
+  name: 'unit',
+  description: '',
+  run: 'npm test',
+  stage: 'checks',
+  env: [],
+  reduce: false,
+  ...fields,
+});
+
+test('a hook saved from a form is written exactly as the wizard writes it', async () => {
+  const root = await project();
+  const saved = await saveHook(root, input({ name: ' /Unit ', run: ' npm test ', reduce: true }), { expectedVersion: 'none' });
+  // What `warband agent new` does for the same answers: saveHooks(root, [...loadHooks(root), newHook]).
+  const wizardRoot = await project();
+  await saveHooks(wizardRoot, [{ name: 'unit', description: '', run: 'npm test', stage: 'checks', reduce: true }]);
+  assert.equal(
+    await readFile(join(warbandDir(root), 'hooks.json'), 'utf8'),
+    await readFile(join(warbandDir(wizardRoot), 'hooks.json'), 'utf8'),
+  );
+  assert.deepEqual(saved.hook, { name: 'unit', description: '', run: 'npm test', stage: 'checks', reduce: true });
+  assert.notEqual(saved.version, 'none');
+});
+
+test('environment rows: blank ones are dropped, a repeated name is a problem, no rows means no env', () => {
+  assert.deepEqual(hookFromInput(input({ env: [['', ''], [' NX_DAEMON ', 'false']] }), '/w').hook.env, { NX_DAEMON: 'false' });
+  assert.ok(!('env' in hookFromInput(input({ env: [['', '  ']] }), '/w').hook));
+  assert.deepEqual(
+    hookFromInput(input({ env: [['A', '1'], ['A', '2'], ['A', '3'], ['1X', 'y']] }), '/w').problems.map((p) => [p.code, p.key]),
+    [
+      ['env-name-invalid', '1X'],
+      ['env-name-duplicate', 'A'],
+    ],
+  );
+  assert.deepEqual(hookFromInput(input({ env: [['', 'value']] }), '/w').problems.map((p) => p.code), ['env-name-invalid']);
+});
+
+test('a hook the policy denies, or with a bad name, is not saved; the problems name their fields', async () => {
+  const root = await project();
+  await assert.rejects(
+    saveHook(root, input({ name: 'Bad Name', run: 'rm -rf build' })),
+    (err: unknown) => {
+      assert.ok(err instanceof HookInvalidError);
+      assert.deepEqual(
+        err.problems.map((p) => [p.field, p.code, p.rule]),
+        [
+          ['name', 'name-invalid', undefined],
+          ['run', 'run-denied', 'shell.rm-recursive-force'],
+        ],
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(await readHooks(root), { hooks: [], version: 'none' });
+});
+
+test('edit in place keeps the order; a taken name and a stale file are refused', async () => {
+  const root = await project();
+  let snap = await saveHook(root, input({ name: 'lint', run: 'npm run lint' }));
+  snap = await saveHook(root, input({ name: 'unit' }), { expectedVersion: snap.version });
+  snap = await saveHook(root, input({ name: 'lint', run: 'npm run lint -- --fix', stage: 'finish' }), { original: 'lint', expectedVersion: snap.version });
+  assert.deepEqual(snap.hooks.map((h) => [h.name, h.run, h.stage]), [
+    ['lint', 'npm run lint -- --fix', 'finish'],
+    ['unit', 'npm test', 'checks'],
+  ]);
+
+  await assert.rejects(saveHook(root, input({ name: 'unit' }), { original: 'lint', expectedVersion: snap.version }), (err: unknown) => {
+    assert.ok(err instanceof HookInvalidError);
+    assert.equal(err.problems[0]?.code, 'name-taken');
+    return true;
+  });
+  await assert.rejects(saveHook(root, input({ name: 'new' }), { expectedVersion: 'stale' }), HooksChangedError);
+  await assert.rejects(saveHook(root, input({ name: 'gone' }), { original: 'gone', expectedVersion: snap.version }), HooksChangedError);
+
+  // A rename of a hook no agent uses is fine.
+  snap = await saveHook(root, input({ name: 'style', run: 'npm run lint' }), { original: 'lint', expectedVersion: snap.version });
+  assert.deepEqual(snap.hooks.map((h) => h.name), ['style', 'unit']);
+});
+
+test('a hook that agents use keeps its name and is not deleted; others are', async () => {
+  const root = await project();
+  let snap: HooksSnapshot = await saveHook(root, input({ name: 'unit' }));
+  snap = await saveHook(root, input({ name: 'spare', run: 'echo hi' }), { expectedVersion: snap.version });
+  await saveAgent(root, agent);
+  await saveAgent(root, { ...agent, name: 'dev' });
+  assert.deepEqual(await hookUsers(root, 'unit'), ['dev', 'test']);
+  assert.deepEqual(await hookUsers(root, 'spare'), []);
+
+  await assert.rejects(saveHook(root, input({ name: 'tests' }), { original: 'unit', expectedVersion: snap.version }), (err: unknown) => {
+    assert.ok(err instanceof HookInvalidError);
+    assert.deepEqual(err.problems.map((p) => [p.code, p.agents]), [['rename-in-use', ['dev', 'test']]]);
+    return true;
+  });
+  await assert.rejects(deleteHook(root, 'unit', snap.version), (err: unknown) => {
+    assert.ok(err instanceof HookInUseError);
+    assert.deepEqual(err.agents, ['dev', 'test']);
+    return true;
+  });
+  await assert.rejects(deleteHook(root, 'spare', 'stale'), HooksChangedError);
+  snap = await deleteHook(root, 'spare', snap.version);
+  assert.deepEqual(snap.hooks.map((h) => h.name), ['unit']);
+  // A hook that is gone already is reported as a change on disk.
+  await assert.rejects(deleteHook(root, 'spare', snap.version), HooksChangedError);
+});
+
+test('hooks.json that is not JSON is an error with its path', async () => {
+  const root = await project();
+  await mkdir(warbandDir(root), { recursive: true });
+  await writeFile(join(warbandDir(root), 'hooks.json'), '{ nope');
+  await assert.rejects(readHooks(root), /hooks\.json is not valid JSON/);
+  await assert.rejects(saveHook(root, input()), /not valid JSON/);
 });
