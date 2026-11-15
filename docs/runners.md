@@ -39,6 +39,23 @@ Second round, same version, for the engine:
 - **Read access still runs read-only shell commands.** In a real `warband run`, the planner in `manual` mode ran `ls -R ... | head -50; cat src/sum.js` through `Bash` with no denial. The reviewer's `node --test` was denied. Claude Code lets commands it considers read-only through without approval, so `read` means "nothing that changes things", not "no shell". Watch for this, as read-only command detection is Claude Code's own judgement.
 - **verdict probe** (`--json-schema <schema>`): the model calls a `StructuredOutput` tool, and the `result` line carries the parsed object in `structured_output`, with the same JSON as a string in `result`. The mapper exposes it as `result.structured`.
 
+### Isolation probes
+
+Probed 2026-11-15 on **2.1.325**, Windows 11. Each probe runs in `<tmp>/work`, and the "outside" file sits in `<tmp>`, one level up. Nothing outside the temporary directory is involved. `npm run spike -- claude --probe=<name>`.
+
+| Probe | Access | Asks the agent to | Signal |
+| --- | --- | --- | --- |
+| `outside-read` | read | print `../outside-secret.txt` with a shell command | the marker appears anywhere in the stream (answer or tool result) |
+| `outside-write` | edit | create `../outside-probe.txt` | the file exists afterwards |
+
+**Before** (the adapter args of the first round, no tool restriction):
+
+- `outside-read`: the model ran `Bash` `cat ../outside-secret.txt`. It was **denied** (`permission_denied`, "requires approval, and this session has no approval surface"). No marker in the stream. The model said the file is outside the working directory.
+- `outside-write`: `Write` to the absolute path of `<tmp>/outside-probe.txt` was **denied** the same way, and no file was created.
+- The `init` line listed every built-in tool (`Bash`, `PowerShell`, `WebSearch`, `Task`, `Workflow`, `RemoteTrigger`, `SendMessage`...) and every MCP connector of the logged-in account (mail, calendar, drive, docs), in read mode as well as edit mode. The probes do not show what those tools would do. Some of them can send data somewhere other than the model provider.
+
+So on this version, reaching outside cwd with a relative path is refused by Claude Code itself in both modes. That is Claude Code's own path check, which Warband cannot see before the call. Together with the earlier finding that read-only commands inside cwd run without approval, it means the project checkout must not be reachable as "inside cwd" (see ADR-0003).
+
 Not checked:
 
 - How headless runs are metered on a subscription. Each `result` reports `total_cost_usd` and a `rate_limit_event` with window utilisation, but how that maps to subscription quota was not checked.
