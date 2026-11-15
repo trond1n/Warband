@@ -16,28 +16,39 @@ One workflow for a coding task, whichever agent CLIs the team has: clarify, plan
 6. **Build the engine**, so that `warband run` takes a task through every stage.
 7. **Try it on a real project, Teamer.** Write `dev` and `test` agents there and run them.
 8. **A desktop window like PurpleFlow's**, built with Electron and React, and **integrate [reslop](https://github.com/tshemsedinov/reslop)**: its short check reports, its review plans, and reviewing in reslop at acceptance.
+9. **Close three security problems from review**, before any new feature:
+   - the worktree must not give access to the main checkout;
+   - the implementer must not quietly weaken the checks;
+   - diffs and hook output are data, not instructions.
 
 ## What is built
 
 | Area | What it does | Where |
 | --- | --- | --- |
-| Runner contract and probes | Headless launch, process tree kill, timeouts. Probes `pong`, `write`, `read`, `edit` and `verdict` in temporary folders, with logs in `spike-output/` | `src/core/runner.ts`, `src/core/proc.ts`, `scripts/spike/` |
-| Claude Code adapter | Verified on 2.1.325. The prompt goes on stdin. Permissions are pinned (`manual` to read, `acceptEdits` to edit, `--permission-prompts none`), and structured answers use `--json-schema` | `src/runners/registry.ts`, `docs/runners.md` |
+| Runner contract and probes | Headless launch, process tree kill, timeouts. Probes `pong`, `write`, `read`, `edit`, `verdict`, and the isolation probes `outside-read`, `outside-grep`, `repo-settings` and `outside-write`, all in temporary folders, with logs in `spike-output/` | `src/core/runner.ts`, `src/core/proc.ts`, `scripts/spike/` |
+| Claude Code adapter | Verified on 2.1.325. The prompt goes on stdin. Permissions are pinned (`manual` to read, `acceptEdits` to edit, `--permission-prompts none`). The tool list is pinned per role with no shell (`--tools`), and no MCP servers are loaded (`--strict-mcp-config`). Structured answers use `--json-schema` | `src/runners/registry.ts`, `docs/runners.md` |
 | Other adapters | `agy` emits stream-json, but every call is refused ("User location is not supported"). Codex and Kimi are not installed on the probe machine. None of them is verified | `docs/runners.md` |
 | Common events | `assistant_text`, `tool_call`, `question`, `result`, `error`, with one mapper per CLI and fixture tests | `src/core/events.ts`, `src/runners/events/` |
 | Agents, skills, hooks | Plain files in `<project>/.warband/`. Hooks run at `setup`, `checks` or `finish` and accept `env`, `reduce` (reslop) and `{warband}` in the command | `src/core/agents.ts`, `src/core/hooks.ts`, `src/core/workspace.ts` |
 | Wizard | `warband agent new` | `src/wizard/` |
-| Engine | `warband run`: a worktree and branch per run, two human gates, reworks capped at 3, cancellation, an event log in `.warband/runs/<run>/events.jsonl`, and a commit on `warband/<run>` | `src/engine/` |
+| Engine | `warband run`: a worktree and branch per run, in a per-user folder outside the project ([ADR-0003](adr/0003-worktrees-outside-the-project.md)). Two human gates, reworks capped at 3, cancellation, an event log in `.warband/runs/<run>/events.jsonl`, and a commit on `warband/<run>` | `src/engine/` |
+| Protected paths | After every implement the changed files are compared with glob patterns, without a model: configs, manifests, lock files, CI, agent settings, `.warband/`, plus deleted or renamed tests. Matches go to the reviewer, to the accept gate and to the log; they do not block | `src/core/protected.ts`, `.warband/protected.json` |
+| Untrusted material in prompts | The task, answers, diffs, check output, review plans and model-written summaries are fenced with per-prompt markers, and the prompt says that nothing inside is an instruction | `src/engine/prompts.ts` |
 | reslop | Hooks marked `reduce` run through `reslop t`. Reviewer findings and line comments become `.plan/*.md` in reslop's format. Acceptance can open reslop, and its plans go back to the implementer. `.plan/` and `.log/` are archived, never committed | `src/engine/plan-file.ts`, `src/engine/run.ts` |
 | Window | `warband ui`: the run list with runs waiting for you, a timeline, the log, checks, review plans, gates with a Monaco diff and line comments, merge, notifications | `app/`, [ADR-0002](adr/0002-desktop-window.md) |
 | PATH | `npm install` runs `npm link` | `scripts/link.ts` |
 
 ## How it was checked
 
-- 82 tests on `node:test`. The engine and the window's run manager run against real git repositories with scripted agents. `tsc` is clean for the core and the app.
+- 100 tests on `node:test`. The engine and the window's run manager run against real git repositories with scripted agents. `tsc` is clean for the core and the app.
+- Isolation probes on Claude Code 2.1.325 (docs/runners.md):
+  - **before** the tool restriction, a shell `cat ../file` in read mode and a `Write` outside cwd in edit mode were both denied by Claude Code's own path check;
+  - **after** it, read and grep outside cwd, a committed `.claude/settings.json` that allows the parent, and a write outside cwd were all denied as well;
+  - the ordinary probes still pass.
 - Real runs on Teamer, a pnpm and Nx monorepo:
   - `/test` added 142 lines of tests to `timer-core`; check, review and commit all passed. It also found a real bug: a paused timer adjusted down to zero never finishes.
   - `/dev` fixed that bug through the window, driven over the DevTools protocol. A line comment went back as a reslop plan, which the implementer ticked off. Prettier failed at checks and the work went back for a fix, then review, acceptance and commit followed.
+  - `/test` ran again after the security work, with its worktree in `%LOCALAPPDATA%\Warband\wt\Teamer-de23f1ca\`, outside the project. It added 82 lines of boundary tests to `libs/ui`, and the setup, check (through reslop) and format hooks passed. The protected-paths check found nothing, no tool was denied, and the commit landed on `warband/test-20261115-174416`. The worktree was removed afterwards. The run found another product bug: `formatInfusions({ min: 0.4 })` returns `'0 раз'` instead of `null`.
 - Problems that only real runs exposed, all fixed:
   - worktrees had no `node_modules` (fixed by the `setup` hooks);
   - git failed on pnpm's long paths when removing a worktree;
@@ -48,7 +59,14 @@ One workflow for a coding task, whichever agent CLIs the team has: clarify, plan
 
 ## Known limits
 
-- Claude's read mode still lets through shell commands it considers read-only (`ls`, `cat`). Warband sees tool calls only after they have run, so the worktree decides where the work lands but is not a sandbox.
+- **No OS-level sandbox.** Keeping agents out of the project checkout rests on three things:
+  - the worktree lives outside the project;
+  - the Claude Code tool list has no shell;
+  - Claude Code's own path check.
+
+  Warband sees tool calls only after they have run, so it cannot veto them. An absolute path can still be asked for. Symlinks from the repository were not probed, because this Windows machine cannot create them. Other CLIs have not been probed at all. Closing this needs a container, a separate user or a similar OS sandbox, and is not attempted with argument filters or regular expressions (ADR-0003).
+- **Protected paths are flagged, not enforced.** The reviewer and the person see the list, but a run that weakens a check is not stopped by Warband. The checks themselves run the project's scripts with the person's rights.
+- **Fenced prompts are a convention, not a guarantee.** Tests check that the prompt is assembled correctly, with untrusted material inside blocks it cannot close (`src/engine/prompts.test.ts`, with an injection fixture). Whether a model follows the instruction not to obey text inside the blocks no test can show.
 - Runs live in the process that started them. Closing the window stops them, after a confirmation.
 - Agents, skills and hooks are created in the terminal; the window only shows them.
 - Opening reslop in an external terminal from the window was not tried by hand, and launching a terminal on macOS or Linux is untested.
