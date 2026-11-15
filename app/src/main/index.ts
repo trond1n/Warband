@@ -198,6 +198,8 @@ async function createWindow(): Promise<void> {
     minWidth: 960,
     minHeight: 600,
     title: 'Warband',
+    // app/build/icon.png from out/main; on Windows the .ico has every size the taskbar asks for.
+    icon: join(here, '../../build', process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     backgroundColor: '#15161a',
     show: false,
     webPreferences: {
@@ -244,6 +246,7 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  if (process.platform === 'darwin') app.dock?.setIcon(join(here, '../../build/icon.png'));
   tools = await detectTools();
   const initial = process.env['WARBAND_PROJECT'];
   if (initial) await addProject(initial);

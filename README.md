@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/warband-mono.png" width="128" height="128" alt="Warband: a chest with a glowing brain inside"></p>
+
 # Warband
 
 Warband runs a coding task through fixed stages (clarify → plan → approve → implement → checks → review → accept → finish). It does the work by launching agent CLIs that are already installed: Claude Code, Codex, Antigravity (`agy`) and Kimi Code. It has no agent loop of its own and never touches credentials. See [ADR-0001](docs/adr/0001-orchestrate-official-clis.md).
