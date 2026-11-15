@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-import type { TimedEvent, WarbandApi } from '../shared/api.ts';
+import type { ProbeState, RunnerId, TimedEvent, WarbandApi } from '../shared/api.ts';
 
 const call =
   (channel: string) =>
@@ -24,6 +24,21 @@ const api: WarbandApi = {
   openReslop: call('openReslop'),
   merge: call('merge'),
   openPath: call('openPath'),
+  providers: call('providers'),
+  saveProvider: call('saveProvider'),
+  probe: call('probe'),
+  cancelProbe: call('cancelProbe'),
+  runnerDocs: call('runnerDocs'),
+  onProbe(listener) {
+    const wrapped = (_: unknown, id: RunnerId, state: ProbeState): void => listener(id, state);
+    ipcRenderer.on('warband:probe', wrapped);
+    return () => ipcRenderer.removeListener('warband:probe', wrapped);
+  },
+  onProvidersChanged(listener) {
+    const wrapped = (): void => listener();
+    ipcRenderer.on('warband:providers-changed', wrapped);
+    return () => ipcRenderer.removeListener('warband:providers-changed', wrapped);
+  },
   onEvent(listener) {
     const wrapped = (_: unknown, runId: string, event: TimedEvent): void => listener(runId, event);
     ipcRenderer.on('warband:event', wrapped);

@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 import type { AppState, ProjectInfo, RunSummary } from '../shared/api.ts';
+import { useConfirm } from './Dialog.tsx';
 import { dayLabel, STAGE_LABEL, STATUS_LABEL } from './model.ts';
+import { ProvidersView } from './Providers.tsx';
+import type { LeaveGuard } from './Providers.tsx';
 import { RunView } from './RunView.tsx';
 
-type View = { kind: 'new' } | { kind: 'run'; runId: string } | { kind: 'project' };
+type View = { kind: 'new' } | { kind: 'run'; runId: string } | { kind: 'project' } | { kind: 'providers' };
 
 /** Events that change what the run list shows. */
 const LIST_EVENTS = new Set(['run_started', 'stage', 'gate_open', 'gate', 'run_finished']);
@@ -16,10 +19,29 @@ export function App(): ReactNode {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [view, setView] = useState<View>(() => {
     const run = /^#run=(.+)$/.exec(window.location.hash)?.[1];
-    return run ? { kind: 'run', runId: decodeURIComponent(run) } : { kind: 'new' };
+    if (run) return { kind: 'run', runId: decodeURIComponent(run) };
+    return window.location.hash === '#view=providers' ? { kind: 'providers' } : { kind: 'new' };
   });
   const [collapsed, setCollapsed] = useState(false);
   const root = state?.current;
+
+  // A settings form registers a guard; leaving it with unsaved edits asks first.
+  const guard = useRef<LeaveGuard | null>(null);
+  const setGuard = useCallback((g: LeaveGuard | null) => {
+    guard.current = g;
+  }, []);
+  const [dialog, ask] = useConfirm();
+  const navigate = useCallback(
+    async (next: View): Promise<boolean> => {
+      if (guard.current?.dirty()) {
+        const leave = await ask({ title: 'Несохранённые правки', body: 'Изменения на этом экране не сохранены. Уйти без сохранения?', confirm: 'Уйти', danger: true });
+        if (!leave) return false;
+      }
+      setView(next);
+      return true;
+    },
+    [ask],
+  );
 
   useEffect(() => {
     void window.warband.state().then(setState);
@@ -61,16 +83,19 @@ export function App(): ReactNode {
 
   return (
     <div className={`shell${collapsed ? ' collapsed' : ''}`}>
+      {dialog}
       <Sidebar
         state={state}
         runs={runs}
         view={view}
-        onView={setView}
+        onView={navigate}
         onState={setState}
         onCollapse={() => setCollapsed((c) => !c)}
       />
       <main className="content">
-        {!root ? (
+        {view.kind === 'providers' ? (
+          <ProvidersView setGuard={setGuard} onSaved={async () => setState(await window.warband.state())} />
+        ) : !root ? (
           <Welcome onAdd={async () => setState(await window.warband.addProject())} />
         ) : view.kind === 'run' ? (
           <RunView key={view.runId} root={root} runId={view.runId} project={project} onChanged={refresh} />
@@ -82,7 +107,7 @@ export function App(): ReactNode {
             tools={state.tools}
             onStarted={(runId) => {
               void refresh();
-              setView({ kind: 'run', runId });
+              void navigate({ kind: 'run', runId });
             }}
           />
         )}
@@ -95,7 +120,7 @@ function Sidebar(props: {
   state: AppState;
   runs: RunSummary[];
   view: View;
-  onView(view: View): void;
+  onView(view: View): Promise<boolean>;
   onState(state: AppState): void;
   onCollapse(): void;
 }): ReactNode {
@@ -129,9 +154,10 @@ function Sidebar(props: {
         <select
           value={state.current ?? ''}
           onChange={async (e) => {
-            if (e.target.value === '__add') props.onState(await window.warband.addProject());
-            else props.onState(await window.warband.selectProject(e.target.value));
-            props.onView({ kind: 'new' });
+            const value = e.target.value;
+            if (!(await props.onView({ kind: 'new' }))) return;
+            if (value === '__add') props.onState(await window.warband.addProject());
+            else props.onState(await window.warband.selectProject(value));
           }}
         >
           {!state.current && <option value="">Выберите проект</option>}
@@ -144,10 +170,14 @@ function Sidebar(props: {
         </select>
       </label>
 
-      <button className={`nav primary${view.kind === 'new' ? ' active' : ''}`} onClick={() => props.onView({ kind: 'new' })}>
+      <button className={`nav primary${view.kind === 'new' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'new' })}>
         + Новая задача
       </button>
-      <button className={`nav${view.kind === 'project' ? ' active' : ''}`} onClick={() => props.onView({ kind: 'project' })} disabled={!state.current}>
+      <h2 className="group">Настройка</h2>
+      <button className={`nav${view.kind === 'providers' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'providers' })}>
+        Провайдеры
+      </button>
+      <button className={`nav${view.kind === 'project' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'project' })} disabled={!state.current}>
         Проект: агенты и хуки
       </button>
 
@@ -156,7 +186,7 @@ function Sidebar(props: {
           <section>
             <h2 className="group waiting-title">Ждут вас · {waiting.length}</h2>
             {waiting.map((r) => (
-              <RunItem key={r.runId} run={r} active={view.kind === 'run' && view.runId === r.runId} onOpen={() => props.onView({ kind: 'run', runId: r.runId })} />
+              <RunItem key={r.runId} run={r} active={view.kind === 'run' && view.runId === r.runId} onOpen={() => void props.onView({ kind: 'run', runId: r.runId })} />
             ))}
           </section>
         )}
@@ -164,7 +194,7 @@ function Sidebar(props: {
           <section key={label}>
             <h2 className="group">{label}</h2>
             {list.map((r) => (
-              <RunItem key={r.runId} run={r} active={view.kind === 'run' && view.runId === r.runId} onOpen={() => props.onView({ kind: 'run', runId: r.runId })} />
+              <RunItem key={r.runId} run={r} active={view.kind === 'run' && view.runId === r.runId} onOpen={() => void props.onView({ kind: 'run', runId: r.runId })} />
             ))}
           </section>
         ))}

@@ -1,15 +1,19 @@
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, watch } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron';
 
+import { configDir, providersFile } from '../../../src/core/providers.ts';
+import type { ProviderSettings } from '../../../src/core/providers.ts';
+import type { RunnerId } from '../../../src/core/runner.ts';
 import { which } from '../../../src/core/which.ts';
 import { git, repoRoot } from '../../../src/engine/git.ts';
-import { RUNNER_IDS, RUNNERS } from '../../../src/runners/registry.ts';
+import { RUNNER_IDS } from '../../../src/runners/registry.ts';
 import type { AppState, GateDecision, TimedEvent, ToolInfo } from '../shared/api.ts';
+import { ProviderService } from './providers.ts';
 import { RunManager } from './runs.ts';
 
 /*
@@ -23,7 +27,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 let window: BrowserWindow | undefined;
 let reslop: string | undefined;
 
-const settingsFile = (): string => join(app.getPath('userData'), 'projects.json');
+/*
+ * Settings of this machine live in one folder: projects.json here, and
+ * providers.json, which `warband doctor` and `warband run` read as well.
+ * configDir() is Electron's userData folder for the app name "Warband".
+ */
+const machineDir = configDir();
+const settingsFile = (): string => join(machineDir, 'projects.json');
 interface Settings {
   projects: string[];
   current?: string;
@@ -48,7 +58,7 @@ let tools: ToolInfo[] = [];
 async function detectTools(): Promise<ToolInfo[]> {
   const runners = await Promise.all(
     RUNNER_IDS.map(async (id): Promise<ToolInfo> => {
-      const runner = RUNNERS[id];
+      const runner = providers.runners[id];
       const d = await runner.detect();
       return { id, name: runner.displayName, found: d.found, ...(d.version ? { version: d.version } : {}), verified: runner.capabilities.verified };
     }),
@@ -83,6 +93,22 @@ const text = (value: unknown, what: string): string => {
   return value;
 };
 
+function runnerId(value: unknown): RunnerId {
+  if (typeof value !== 'string' || !(RUNNER_IDS as readonly string[]).includes(value)) throw new Error('runner id expected');
+  return value as RunnerId;
+}
+
+/** Shape and size only; what the values mean is validated by the core on save. */
+function providerInput(value: unknown): ProviderSettings {
+  const v = value as { binary?: unknown; models?: unknown } | null;
+  if (!v || typeof v !== 'object') throw new Error('provider settings expected');
+  if (v.binary !== undefined && (typeof v.binary !== 'string' || v.binary.length > 1024)) throw new Error('binary path expected');
+  if (!Array.isArray(v.models) || v.models.length > 200 || !v.models.every((m) => typeof m === 'string' && m.length <= 200)) {
+    throw new Error('model ids expected');
+  }
+  return { ...(v.binary !== undefined ? { binary: v.binary } : {}), models: v.models as string[] };
+}
+
 function decision(value: unknown): GateDecision {
   const v = value as Partial<GateDecision> | null;
   if (!v || (v.outcome !== 'ok' && v.outcome !== 'changes_requested' && v.outcome !== 'rejected')) throw new Error('decision expected');
@@ -115,8 +141,16 @@ function openTerminal(cwd: string, program: string): void {
   child.unref();
 }
 
+const providers = new ProviderService({
+  dir: machineDir,
+  // app/out/main -> docs/runners.md of this Warband checkout.
+  docsFile: join(here, '../../../docs/runners.md'),
+  onRunners: (runners) => manager.useRunners(runners),
+  onProbe: (id, state) => window?.webContents.send('warband:probe', id, state),
+});
+
 const manager = new RunManager({
-  runners: RUNNERS,
+  runners: providers.runners,
   emit(runId: string, event: TimedEvent) {
     window?.webContents.send('warband:event', runId, event);
   },
@@ -185,6 +219,15 @@ function registerIpc(): void {
     const result = await git(project, ['merge', '--no-edit', name]);
     return { ok: result.code === 0, output: [...result.stdout, ...result.stderr].join('\n') };
   });
+  handle('providers', () => providers.view());
+  handle('saveProvider', async (id, settings, version) => {
+    const result = await providers.save(runnerId(id), providerInput(settings), text(version, 'version'));
+    if (result.ok) tools = await detectTools();
+    return result;
+  });
+  handle('probe', (id) => providers.probe(runnerId(id)));
+  handle('cancelProbe', () => providers.cancelProbe());
+  handle('runnerDocs', (section) => providers.docs(text(section, 'section')));
   handle('openPath', async (path) => {
     const target = text(path, 'path');
     if (existsSync(target)) await shell.openPath(target);
@@ -229,8 +272,10 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-navigate', (event) => event.preventDefault());
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
-  // WARBAND_OPEN_RUN=<run id> opens that run's page at start.
-  const hash = process.env['WARBAND_OPEN_RUN'] ? `run=${process.env['WARBAND_OPEN_RUN']}` : '';
+  // WARBAND_OPEN_RUN=<run id> opens that run's page at start; WARBAND_OPEN_VIEW=providers opens that screen.
+  const openRun = process.env['WARBAND_OPEN_RUN'];
+  const openView = process.env['WARBAND_OPEN_VIEW'];
+  const hash = openRun ? `run=${openRun}` : openView === 'providers' ? 'view=providers' : '';
   if (devUrl) await window.loadURL(hash ? `${devUrl}#${hash}` : devUrl);
   else await window.loadFile(join(here, '../renderer/index.html'), hash ? { hash } : {});
 
@@ -245,8 +290,28 @@ async function createWindow(): Promise<void> {
   }
 }
 
+/** Tells the window when providers.json changes on disk, by hand or from `warband` elsewhere. */
+async function watchProviders(): Promise<void> {
+  await mkdir(machineDir, { recursive: true });
+  const name = providersFile(machineDir).slice(machineDir.length + 1);
+  let timer: NodeJS.Timeout | undefined;
+  watch(machineDir, (_event, file) => {
+    if (file !== name) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      void providers.load().then(() => {
+        manager.useRunners(providers.runners);
+        window?.webContents.send('warband:providers-changed');
+      });
+    }, 200);
+  });
+}
+
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.setIcon(join(here, '../../build/icon.png'));
+  await providers.load();
+  manager.useRunners(providers.runners);
+  await watchProviders();
   tools = await detectTools();
   const initial = process.env['WARBAND_PROJECT'];
   if (initial) await addProject(initial);
@@ -259,6 +324,7 @@ app.on('window-all-closed', () => app.quit());
 // Runs live in this process: stop their agents and hooks before quitting, so nothing is left running.
 let quitting = false;
 app.on('before-quit', (event) => {
+  providers.cancelProbe();
   if (quitting || manager.activeCount === 0) return;
   event.preventDefault();
   quitting = true;
