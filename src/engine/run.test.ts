@@ -175,7 +175,11 @@ test('a failing check sends the work back with the check output in the next prom
   assert.equal(run.state.reworks, 1);
   const attempts = calls.filter((c) => c.stage === 'implement');
   assert.equal(attempts.length, 2);
-  assert.match(attempts[1]?.req.prompt ?? '', /attempt 2[\s\S]*Check "content" failed \(exit 1\)/);
+  assert.match(
+    attempts[1]?.req.prompt ?? '',
+    /attempt 2[\s\S]*These checks failed: "content" \(exit 1\)\. Their output follows\.\n\n<<<UNTRUSTED kind="check-output" label="content, exit 1" id="[0-9a-f]{12}">>>/,
+    'the check output is fenced as material',
+  );
 });
 
 const finding = {

@@ -40,7 +40,7 @@ import {
   planPrompt,
   reviewPrompt,
 } from './prompts.ts';
-import type { PromptContext } from './prompts.ts';
+import type { Feedback, PromptContext } from './prompts.ts';
 
 export type Role = 'planner' | 'implementer' | 'reviewer';
 
@@ -302,14 +302,17 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     return results;
   }
 
-  const describeFailures = (results: readonly HookResult[]): string =>
-    results
-      .filter((r) => !r.ok)
-      .map((r) => `Check "${r.name}" failed (${r.timedOut ? 'timed out' : `exit ${r.exitCode}`}). Its output:\n${r.output.join('\n')}`)
-      .join('\n\n');
+  const describeFailures = (results: readonly HookResult[]): Feedback => {
+    const failed = results.filter((r) => !r.ok);
+    const status = (r: HookResult): string => (r.timedOut ? 'timed out' : `exit ${r.exitCode}`);
+    return {
+      note: `These checks failed: ${failed.map((r) => `"${r.name}" (${status(r)})`).join(', ')}. Their output follows.`,
+      blocks: failed.map((r) => ({ kind: 'check-output', label: `${r.name}, ${status(r)}`, text: r.output.join('\n') || '(no output)' })),
+    };
+  };
 
   // --- The route. Each handler returns the stage outcome; advance() decides what comes next.
-  let feedback: string | undefined;
+  let feedback: Feedback | undefined;
   let planFeedback: string | undefined;
   let summary = '';
   let reviewComments: string[] = [];
@@ -358,7 +361,10 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
       guarded = findProtected(await changedFiles(worktree, base), protectedRules);
       report({ type: 'protected_changes', changes: guarded });
       if (!result.ok) {
-        feedback = `The previous attempt did not finish: ${result.errors.join('; ') || 'the agent reported a failure'}.`;
+        feedback = {
+          note: 'The previous attempt did not finish. What the CLI reported follows.',
+          blocks: [{ kind: 'agent-error', text: result.errors.join('\n') || 'the agent reported a failure' }],
+        };
         return 'failed';
       }
       return 'ok';
@@ -374,7 +380,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     async review(state) {
       const change = await stagedDiff(worktree, base);
       if (change.diff.trim() === '') {
-        feedback = 'No files were changed. Implement the plan.';
+        feedback = { note: 'No files were changed. Implement the plan.', blocks: [] };
         reviewComments = ['No files were changed.'];
         return 'changes_requested';
       }
@@ -419,11 +425,15 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
           report({ type: 'plan_written', stage: 'accept', name, source: 'person', findings: lineComments.length });
         }
         const pending = pendingPlans(await readPlans(worktree));
+        // The person's own comment is theirs, so it is part of Warband's note; plans are material.
         const said =
           decision.comment && lineComments.length === 0 ? `The person who set the task asked for changes:\n${decision.comment}` : '';
-        feedback =
-          [said, pending.length > 0 ? plansFeedback(pending) : ''].filter(Boolean).join('\n\n') ||
-          'The person who set the task asked for changes but gave no details. Re-read the task and the plan.';
+        const plans = pending.length > 0 ? plansFeedback(pending) : undefined;
+        const note = [said, plans?.note ?? ''].filter(Boolean).join('\n\n');
+        feedback = {
+          note: note || 'The person who set the task asked for changes but gave no details. Re-read the task and the plan.',
+          blocks: plans?.blocks ?? [],
+        };
       }
       return decision.outcome;
     },
