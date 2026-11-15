@@ -20,6 +20,59 @@ export interface Capabilities {
   /** What happens to a tool call that would ask for approval interactively. */
   headlessApprovals: 'auto-run' | 'deny' | 'may-hang' | 'unknown';
   verified: boolean;
+  /**
+   * The CLI version the probes confirmed these fields on, e.g. "2.1.325".
+   * Set together with `verified`. CLIs update themselves, so a different
+   * installed version is reported (see `versionDrift`) but not blocked.
+   */
+  verifiedOn?: string;
+}
+
+/** The first dotted number in a version line, e.g. "2.1.325 (Claude Code)" -> [2, 1, 325]. */
+export function parseVersion(text: string | undefined): number[] | undefined {
+  const match = /\d+(?:\.\d+)+/.exec(text ?? '');
+  return match ? match[0].split('.').map(Number) : undefined;
+}
+
+/**
+ * How the installed version compares with the one the adapter was verified
+ * on. Any difference counts, patch included: these CLIs release under the
+ * patch number (Claude Code 2.1.325 is one of hundreds of 2.1 releases), and
+ * the headless contract has changed inside a patch series (docs/runners.md:
+ * agy 1.5.0 to 1.5.9 changed where print mode writes). Comparing only the
+ * major or minor part would stay silent through exactly those changes.
+ */
+export type VersionDrift =
+  /** Nothing to compare: the adapter is not verified, or the CLI is not installed. */
+  | { kind: 'none' }
+  | { kind: 'same'; verifiedOn: string }
+  | { kind: 'differs'; verifiedOn: string; installed: string; newer: boolean }
+  /** The CLI did not print a version Warband can read. */
+  | { kind: 'unknown'; verifiedOn: string };
+
+export function versionDrift(capabilities: Capabilities, installed: string | undefined, found = true): VersionDrift {
+  const verifiedOn = capabilities.verifiedOn;
+  if (!capabilities.verified || verifiedOn === undefined || !found) return { kind: 'none' };
+  const want = parseVersion(verifiedOn);
+  const have = parseVersion(installed);
+  if (!want || !have) return { kind: 'unknown', verifiedOn };
+  const length = Math.max(want.length, have.length);
+  for (let i = 0; i < length; i++) {
+    const a = have[i] ?? 0;
+    const b = want[i] ?? 0;
+    if (a !== b) return { kind: 'differs', verifiedOn, installed: have.join('.'), newer: a > b };
+  }
+  return { kind: 'same', verifiedOn };
+}
+
+/** One line for the terminal and the run log, or undefined when there is nothing to say. */
+export function driftMessage(name: string, id: string, drift: VersionDrift): string | undefined {
+  const probe = `Run the probes to check it: npm run spike -- ${id}, or "Проверить" in the window.`;
+  if (drift.kind === 'differs') {
+    return `${name} is ${drift.installed}, but its adapter was verified on ${drift.verifiedOn}; headless behaviour may have changed. ${probe}`;
+  }
+  if (drift.kind === 'unknown') return `${name} did not report a version Warband can compare with ${drift.verifiedOn}, the one its adapter was verified on. ${probe}`;
+  return undefined;
 }
 
 export type RunnerEvent =

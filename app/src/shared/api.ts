@@ -10,7 +10,7 @@ import type { EngineEvent, GateDecision } from '../../../src/engine/run.ts';
 import type { Finding } from '../../../src/engine/plan-file.ts';
 import type { ProtectedChange } from '../../../src/core/protected.ts';
 import type { ProviderProblem, ProviderSettings } from '../../../src/core/providers.ts';
-import type { Capabilities, LoginState, RunnerId } from '../../../src/core/runner.ts';
+import type { Capabilities, LoginState, RunnerId, VersionDrift } from '../../../src/core/runner.ts';
 import type { ProbeResult } from '../../../scripts/spike/probes.ts';
 
 export type {
@@ -26,6 +26,7 @@ export type {
   ProviderProblem,
   ProviderSettings,
   RunnerId,
+  VersionDrift,
 };
 
 /** An engine event with the time it was reported. */
@@ -107,6 +108,8 @@ export interface ProviderInfo {
   problem?: string;
   login: LoginState;
   capabilities: Capabilities;
+  /** Installed version against the one the adapter was verified on. */
+  drift: VersionDrift;
   probe: ProbeState;
 }
 

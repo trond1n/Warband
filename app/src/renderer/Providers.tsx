@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import type { ProbeState, ProviderInfo, ProviderProblem, ProvidersView as View, RunnerId } from '../shared/api.ts';
 import { useConfirm } from './Dialog.tsx';
 import { Markdown } from './Markdown.tsx';
-import { APPROVALS_LABEL, DOCS_SECTION, formOf, isDirty, loginLabel, probeRow, problemText, SANDBOX_LABEL, settingsOf } from './providers-model.ts';
+import { adapterLabel, APPROVALS_LABEL, DOCS_SECTION, driftText, formOf, isDirty, loginLabel, probeRow, problemText, SANDBOX_LABEL, settingsOf } from './providers-model.ts';
 import type { ProviderForm } from './providers-model.ts';
 
 /*
@@ -137,6 +137,7 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
               <span className="run-meta">
                 {p.found ? (p.version ?? 'установлен') : 'не найден'}
                 {p.capabilities.verified ? ' · подтверждён' : ''}
+                {p.drift.kind === 'differs' || p.drift.kind === 'unknown' ? ' · версия отличается' : ''}
               </span>
             </span>
           </button>
@@ -176,7 +177,7 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
               {current.settings.binary ? ' (путь задан здесь)' : ' (ищется в PATH)'}
             </dd>
             <dt>Адаптер</dt>
-            <dd>{current.capabilities.verified ? 'подтверждён пробами' : 'не подтверждён: поведение без человека не проверено'}</dd>
+            <dd>{adapterLabel(current.capabilities)}</dd>
             <dt>Песочница</dt>
             <dd>{SANDBOX_LABEL[current.capabilities.sandbox]}</dd>
             <dt>Разрешения без человека</dt>
@@ -184,6 +185,14 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
             <dt>Вход</dt>
             <dd>{loginLabel(current.login, current.found)}</dd>
           </dl>
+          {driftText(current.drift) && (
+            <div className="callout warn drift" role="status">
+              {driftText(current.drift)}{' '}
+              <button className="link" disabled={current.probe.running} onClick={() => void probe(current)}>
+                Запустить пробы
+              </button>
+            </div>
+          )}
           <div className="small">
             <DocsLink section={DOCS_SECTION[current.id]}>Подробнее в docs/runners.md</DocsLink>
           </div>

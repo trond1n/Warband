@@ -1,4 +1,4 @@
-import type { Capabilities, LoginState, ProbeResult, ProviderProblem, ProviderSettings, RunnerId } from '../shared/api.ts';
+import type { Capabilities, LoginState, ProbeResult, ProviderProblem, ProviderSettings, RunnerId, VersionDrift } from '../shared/api.ts';
 
 /*
  * Labels and form logic for the "Провайдеры" screen, kept apart from React
@@ -23,6 +23,23 @@ export function loginLabel(login: LoginState, found: boolean): string {
   if (login.state === 'in') return `выполнен${login.method ? ` (${login.method})` : ''}`;
   if (login.state === 'out') return 'не выполнен';
   return 'неизвестно: CLI сам этого не сообщает';
+}
+
+/** What the card says about the adapter, with the version it was verified on. */
+export function adapterLabel(capabilities: Capabilities): string {
+  if (!capabilities.verified) return 'не подтверждён: поведение без человека не проверено';
+  return capabilities.verifiedOn ? `подтверждён пробами на версии ${capabilities.verifiedOn}` : 'подтверждён пробами';
+}
+
+/** A warning when the installed CLI is not the version its adapter was verified on; undefined when there is none. */
+export function driftText(drift: VersionDrift): string | undefined {
+  if (drift.kind === 'differs') {
+    return `Установлена версия ${drift.installed}, а адаптер подтверждён на ${drift.verifiedOn}${drift.newer ? '' : ' (установленная старше)'}. Поведение без человека могло измениться: запустите пробы. Прогоны это не блокирует.`;
+  }
+  if (drift.kind === 'unknown') {
+    return `CLI не сообщил версию, которую можно сравнить с ${drift.verifiedOn}, на которой подтверждён адаптер. Запустите пробы. Прогоны это не блокирует.`;
+  }
+  return undefined;
 }
 
 /** Section of docs/runners.md for each CLI. */

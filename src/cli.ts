@@ -27,6 +27,7 @@ import { runTask } from './engine/run.ts';
 import { renderEvent, terminalGate } from './engine/terminal.ts';
 import { configDir, loadProviders, providersFile } from './core/providers.ts';
 import { createRunners, RUNNER_IDS } from './runners/registry.ts';
+import { driftMessage, versionDrift } from './core/runner.ts';
 import type { Runner } from './core/runner.ts';
 import { CLAUDE_MODEL_ALIASES, agentWizard, parseAgyModels } from './wizard/agent-wizard.ts';
 import type { Prompter } from './wizard/agent-wizard.ts';
@@ -60,10 +61,14 @@ async function machineRunners(): Promise<Record<RunnerId, Runner>> {
 async function doctor(): Promise<number> {
   const providers = await loadProviders(configDir());
   const runners = createRunners(providers);
+  const drifts: string[] = [];
   const rows = await Promise.all(
     RUNNER_IDS.map(async (id) => {
       const runner = runners[id];
       const detection = await runner.detect();
+      const drift = versionDrift(runner.capabilities, detection.version, detection.found);
+      const driftNote = driftMessage(runner.displayName, id, drift);
+      if (driftNote) drifts.push(driftNote);
       return {
         CLI: runner.displayName,
         binary: providers[id]?.binary ? `${runner.binary} (set)` : runner.binary,
@@ -71,12 +76,21 @@ async function doctor(): Promise<number> {
         version: detection.version ?? '',
         sandbox: runner.capabilities.sandbox,
         'headless approvals': runner.capabilities.headlessApprovals,
-        verified: runner.capabilities.verified ? 'yes' : 'no',
-        note: detection.found ? (detection.problem ?? '') : providers[id]?.binary ? 'cannot start the set binary' : 'not on PATH',
+        verified: runner.capabilities.verified ? `yes${runner.capabilities.verifiedOn ? ` (${runner.capabilities.verifiedOn})` : ''}` : 'no',
+        note: !detection.found
+          ? providers[id]?.binary
+            ? 'cannot start the set binary'
+            : 'not on PATH'
+          : drift.kind === 'differs'
+            ? `version differs from verified ${drift.verifiedOn}`
+            : drift.kind === 'unknown'
+              ? 'version not comparable'
+              : (detection.problem ?? ''),
       };
     }),
   );
   console.table(rows);
+  for (const line of drifts) console.log(`Warning: ${line}`);
   console.log(`Binaries marked (set) come from ${providersFile(configDir())}.`);
   console.log('Login state is not checked here. Run `npm run spike` to test a real headless call.');
   return rows.some((row) => row.installed === 'yes') ? 0 : 1;

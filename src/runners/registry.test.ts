@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { parseVersion } from '../core/runner.ts';
 import type { RunRequest } from '../core/runner.ts';
 import { CLAUDE_TOOLS, claudeArgs, createRunners, parseClaudeLogin, RUNNERS } from './registry.ts';
 
@@ -47,4 +48,10 @@ test('only Claude Code reports its login, and only the flag and method are kept'
   assert.deepEqual(parseClaudeLogin(status), { state: 'in', method: 'claude.ai' });
   assert.deepEqual(parseClaudeLogin('{"loggedIn": false}'), { state: 'out' });
   assert.deepEqual(parseClaudeLogin('{}'), { state: 'unknown' });
+});
+
+test('every verified adapter records the version it was verified on', () => {
+  for (const runner of Object.values(RUNNERS)) {
+    if (runner.capabilities.verified) assert.ok(parseVersion(runner.capabilities.verifiedOn), runner.id);
+  }
 });

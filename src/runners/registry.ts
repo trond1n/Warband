@@ -77,6 +77,7 @@ export const RUNNER_SPECS: Record<RunnerId, CliRunnerSpec> = {
       headlessApprovals: 'deny',
       // All fields checked on 2.1.325 with the args above, see docs/runners.md.
       verified: true,
+      verifiedOn: '2.1.325',
     },
   },
 

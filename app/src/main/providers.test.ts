@@ -85,6 +85,9 @@ test('the view lists every CLI with its state; login is unknown unless the CLI r
     ],
   );
   assert.equal(view.providers[0]?.command, 'claude');
+  // The scripted Claude reports 1.0, not the 2.1.325 its adapter was verified on.
+  assert.deepEqual(view.providers[0]?.drift, { kind: 'differs', verifiedOn: '2.1.325', installed: '1.0', newer: false });
+  assert.deepEqual(view.providers[2]?.drift, { kind: 'none' }, 'unverified adapters have nothing to compare');
   assert.equal(view.version, 'none');
   assert.equal(view.error, undefined);
 });

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 
 import { ProviderInvalidError, ProvidersChangedError, providersFile, readProviders, saveProvider } from '../../../src/core/providers.ts';
 import type { ProviderSettings, Providers } from '../../../src/core/providers.ts';
+import { versionDrift } from '../../../src/core/runner.ts';
 import type { Runner, RunnerId } from '../../../src/core/runner.ts';
 import { createRunners, RUNNER_IDS, RUNNER_SPECS } from '../../../src/runners/registry.ts';
 import { PROBES, runProbe } from '../../../scripts/spike/probes.ts';
@@ -95,6 +96,7 @@ export class ProviderService {
           ...(detection.problem ? { problem: detection.problem } : {}),
           login,
           capabilities: runner.capabilities,
+          drift: versionDrift(runner.capabilities, detection.version, detection.found),
           probe: this.probeState(id),
         };
       }),

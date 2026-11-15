@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { ProbeResult, ProviderProblem } from '../shared/api.ts';
-import { formOf, isDirty, loginLabel, PROBE_LABEL, probeRow, problemText, settingsOf } from './providers-model.ts';
+import { adapterLabel, driftText, formOf, isDirty, loginLabel, PROBE_LABEL, probeRow, problemText, settingsOf } from './providers-model.ts';
 import { PROBES } from '../../../scripts/spike/probes.ts';
 
 test('the form maps to settings the way the core will store them', () => {
@@ -61,4 +61,15 @@ test('every spike probe has a description, and results read as a table row', () 
   });
   assert.equal(probeRow({ ...result, 'file created': 'yes: "ok"' }).file, 'да: "ok"');
   assert.equal(probeRow({ ...result, 'file created': '' }).file, '—');
+});
+
+test('the card names the verified version and warns when the installed one differs', () => {
+  const caps = { transport: 'stream', structuredOutput: true, sandbox: 'agent', headlessApprovals: 'deny', verified: true, verifiedOn: '2.1.325' } as const;
+  assert.equal(adapterLabel(caps), 'подтверждён пробами на версии 2.1.325');
+  assert.match(adapterLabel({ ...caps, verified: false }), /^не подтверждён/);
+  assert.equal(driftText({ kind: 'same', verifiedOn: '2.1.325' }), undefined);
+  assert.equal(driftText({ kind: 'none' }), undefined);
+  assert.match(driftText({ kind: 'differs', verifiedOn: '2.1.325', installed: '2.1.330', newer: true }) ?? '', /2\.1\.330.*2\.1\.325.*запустите пробы.*не блокирует/);
+  assert.match(driftText({ kind: 'differs', verifiedOn: '2.1.325', installed: '2.1.300', newer: false }) ?? '', /установленная старше/);
+  assert.match(driftText({ kind: 'unknown', verifiedOn: '2.1.325' }) ?? '', /не сообщил версию/);
 });

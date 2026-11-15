@@ -524,3 +524,20 @@ test('structured answers fall back to JSON in the final text', () => {
   assert.deepEqual(structuredAnswer({ ...base, text: '```json\n{"verdict":"approve"}\n```' }), { verdict: 'approve' });
   assert.equal(structuredAnswer({ ...base, text: 'not json' }), undefined);
 });
+
+test('a CLI that updated itself since its adapter was verified is reported once, and the run goes on', async () => {
+  const root = await setup();
+  const { runners } = fakeRunners({});
+  for (const runner of Object.values(runners) as Runner[]) {
+    Object.assign(runner, {
+      capabilities: { ...runner.capabilities, verifiedOn: '2.1.325' },
+      detect: async () => ({ found: true, version: '2.1.330 (Claude Code)' }),
+    });
+  }
+  const events: EngineEvent[] = [];
+  const run = await go(root, runners, scriptedGate([], []), events);
+  assert.equal(run.state.status, 'done');
+  const drift = events.filter((e) => e.type === 'warning' && /verified on 2\.1\.325/.test(e.message));
+  assert.equal(drift.length, 1, 'planner, implementer and reviewer share one CLI: one warning');
+  assert.match(drift[0]?.type === 'warning' ? drift[0].message : '', /is 2\.1\.330.*npm run spike -- claude/);
+});

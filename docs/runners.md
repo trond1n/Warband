@@ -134,4 +134,10 @@ Login state comes only from the CLI itself. Claude Code reports it with `claude 
 2. Run `npm run spike -- <id>` (or `--probe=pong` / `--probe=write`) and read `spike-output/<id>.<probe>.log`. Take flags from `<binary> --help` of the installed version.
 3. Record the version and the findings here.
 4. Write `src/runners/events/<id>.ts` against what the log shows. Make fixtures with `node scripts/spike/fixture.ts spike-output/<id>.<probe>.log src/runners/events/fixtures/<id>.<probe>.jsonl`, read them, and add tests.
-5. Set `verified: true` once every capability field has been checked.
+5. Set `verified: true` once every capability field has been checked, and `verifiedOn` to the version the probes ran on.
+
+### Version drift
+
+CLIs update themselves (agy went from 1.5.0 to 1.5.9 during one probing session), so a verified adapter records the version it was checked on in `capabilities.verifiedOn`. `versionDrift` in `src/core/runner.ts` compares it with what `--version` prints. Every part of the version is compared, patch included. These CLIs ship under the patch number (Claude Code 2.1.325 is one of many 2.1 releases), and the headless contract has changed inside a patch series, as with agy's print mode between 1.5.0 and 1.5.9. Comparing only the major or minor part would miss exactly those releases. The cost is a warning after most Claude Code updates, which is the point: the probes are cheap next to an unnoticed change in what a headless run may do.
+
+A different version is reported by `warband doctor`, on the Providers card, and as a warning at the start of a run. A version that cannot be read is reported the same way. Nothing is blocked. The fix is to run the probes, update this file, and move `verifiedOn`.
