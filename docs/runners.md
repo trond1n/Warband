@@ -4,7 +4,7 @@ What Warband assumes about each CLI when nobody is at the terminal. A row is **c
 
 | CLI | Binary | Headless call | Output | Own sandbox | Approvals when headless | Status |
 | --- | --- | --- | --- | --- | --- | --- |
-| Claude Code | `claude` | `-p --output-format stream-json --verbose --permission-mode manual|acceptEdits --permission-prompts none [--json-schema]`, prompt on stdin | JSON lines, key `type` | Permission rules (agent level) | Denied at once, run continues | **Verified** on 2.1.325, Windows, subscription login |
+| Claude Code | `claude` | `-p --output-format stream-json --verbose --permission-mode manual|acceptEdits --permission-prompts none --tools <per role> --strict-mcp-config [--json-schema]`, prompt on stdin | JSON lines, key `type` | Permission rules (agent level) | Denied at once, run continues | **Verified** on 2.1.325, Windows, subscription login |
 | Codex | `codex` | `exec --json <prompt>` | JSON lines | OS-level | Unknown | Unverified, not installed on the probe machine |
 | Antigravity | `agy` | `-p <prompt> --output-format stream-json` | JSON lines, key `event` | Unknown, `--sandbox` exists | Unknown | Output confirmed on 1.5.9, no successful run yet |
 | Kimi Code | `kimi` | `-p <prompt> --output-format stream-json` | JSON lines | None | Reported to run everything | Unverified, not installed on the probe machine |
@@ -36,7 +36,7 @@ Second round, same version, for the engine:
 - **Prompt on stdin.** `claude -p` without a prompt argument reads it from stdin, which is then closed. All five probes ran this way. The adapter needs it because a review prompt carries a diff, and argv is limited to about 32K characters on Windows.
 - **read probe** (`manual`): reading a seeded file needed no approval. The `Read` tool ran and the answer was right, so the planner and the reviewer can look at the code.
 - **edit probe** (`--permission-mode acceptEdits`): `Write` created the file without approval. The shell command that followed (`PowerShell`, `node --version`) was denied with `system/permission_denied` and listed in `permission_denials`. Exit code 0, no hang. This is the implementer's mode: files yes, commands no. Commands are what hooks are for.
-- **Read access still runs read-only shell commands.** In a real `warband run`, the planner in `manual` mode ran `ls -R ... | head -50; cat src/sum.js` through `Bash` with no denial. The reviewer's `node --test` was denied. Claude Code lets commands it considers read-only through without approval, so `read` means "nothing that changes things", not "no shell". Watch for this, as read-only command detection is Claude Code's own judgement.
+- **Read access still ran read-only shell commands** (before `--tools`, see Isolation probes). In a real `warband run`, the planner in `manual` mode ran `ls -R ... | head -50; cat src/sum.js` through `Bash` with no denial. The reviewer's `node --test` was denied. Claude Code lets commands it considers read-only through without approval, so `read` means "nothing that changes things", not "no shell". Watch for this, as read-only command detection is Claude Code's own judgement.
 - **verdict probe** (`--json-schema <schema>`): the model calls a `StructuredOutput` tool, and the `result` line carries the parsed object in `structured_output`, with the same JSON as a string in `result`. The mapper exposes it as `result.structured`.
 
 ### Isolation probes
@@ -53,6 +53,20 @@ Probed 2026-11-15 on **2.1.325**, Windows 11. Each probe runs in `<tmp>/work`, a
 - `outside-read`: the model ran `Bash` `cat ../outside-secret.txt`. It was **denied** (`permission_denied`, "requires approval, and this session has no approval surface"). No marker in the stream. The model said the file is outside the working directory.
 - `outside-write`: `Write` to the absolute path of `<tmp>/outside-probe.txt` was **denied** the same way, and no file was created.
 - The `init` line listed every built-in tool (`Bash`, `PowerShell`, `WebSearch`, `Task`, `Workflow`, `RemoteTrigger`, `SendMessage`...) and every MCP connector of the logged-in account (mail, calendar, drive, docs), in read mode as well as edit mode. The probes do not show what those tools would do. Some of them can send data somewhere other than the model provider.
+
+**After** pinning `--tools` and `--strict-mcp-config` (the read role gets `Read,Glob,Grep`, the edit role adds `Edit,Write`; `--help` of 2.1.325: "Specify the list of available tools from the built-in set" and "Only use MCP servers from --mcp-config"):
+
+| Probe | Result |
+| --- | --- |
+| `outside-read` | No shell in the tool list, so the model used `Read` on the parent path instead. **Denied**, and no marker in the stream. |
+| `outside-grep` | `Grep` on the absolute path of the outside file was **denied**, with no marker. |
+| `repo-settings` | A `.claude/settings.json` in the working directory with `additionalDirectories: [".."]` and `allow: ["Read(../**)"]`. `Read` was still **denied**, with no marker. Whether project settings were ignored or were loaded without widening anything does not show in the stream. |
+| `outside-write` | `Write` was **denied**, and no file was created. |
+| `pong`, `read`, `edit`, `verdict` | Unchanged: answers right, `edit` creates the file, and `verdict` still arrives through `StructuredOutput`, which is added to the tool list by `--json-schema` even with `--tools`. |
+
+`init` now lists `Glob, Grep, Read` (plus `Edit, Write` for edit, plus `StructuredOutput` with a schema) and `mcp_servers: []`. The shell is gone instead of denied, so read-only commands can no longer run, and the account's connectors are not offered to the agent.
+
+Each probe ran once. A probe shows what the model tried this time, not every way a model could try. All the denials are Claude Code's own path checks.
 
 So on this version, reaching outside cwd with a relative path is refused by Claude Code itself in both modes. That is Claude Code's own path check, which Warband cannot see before the call. Together with the earlier finding that read-only commands inside cwd run without approval, it means the project checkout must not be reachable as "inside cwd" (see ADR-0003).
 
