@@ -1053,3 +1053,57 @@ input[aria-invalid='true'] {
 .modal h2 {
   margin-top: 0;
 }
+
+/* Hooks screen */
+.split-form fieldset {
+  border: 0;
+  padding: 0;
+  margin: 16px 0 0;
+}
+.split-form legend {
+  padding: 0;
+  margin-bottom: 4px;
+}
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 4px;
+}
+.env-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 2fr) auto;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+textarea.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+input[type='text'].plain-font {
+  font-family: inherit;
+  font-size: inherit;
+}
+.split-list > .button {
+  margin: 8px 0 4px;
+}
+.split-form .empty {
+  height: auto;
+  margin-top: 48px;
+}
+.trial {
+  margin-top: 12px;
+}
+.trial-output {
+  max-height: 360px;
+  margin-top: 4px;
+}
+.confirm-command {
+  margin: 2px 0 10px;
+  max-height: 200px;
+  user-select: text;
+}
+.modal .muted.small {
+  margin: 8px 0 0;
+}

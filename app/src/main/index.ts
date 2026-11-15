@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync, watch } from 'node:fs';
+import type { FSWatcher } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,11 +9,14 @@ import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electr
 
 import { configDir, providersFile } from '../../../src/core/providers.ts';
 import type { ProviderSettings } from '../../../src/core/providers.ts';
+import { NAME_PATTERN } from '../../../src/core/hooks.ts';
+import type { HookInput } from '../../../src/core/workspace.ts';
 import type { RunnerId } from '../../../src/core/runner.ts';
 import { which } from '../../../src/core/which.ts';
 import { git, repoRoot } from '../../../src/engine/git.ts';
 import { RUNNER_IDS } from '../../../src/runners/registry.ts';
 import type { AppState, GateDecision, TimedEvent, ToolInfo } from '../shared/api.ts';
+import { HookService } from './hooks.ts';
 import { ProviderService } from './providers.ts';
 import { RunManager } from './runs.ts';
 
@@ -109,6 +113,40 @@ function providerInput(value: unknown): ProviderSettings {
   return { ...(v.binary !== undefined ? { binary: v.binary } : {}), models: v.models as string[] };
 }
 
+/** A hook name, checked before it is used for anything. */
+function hookName(value: unknown): string {
+  if (typeof value !== 'string' || !NAME_PATTERN.test(value)) throw new Error('hook name expected');
+  return value;
+}
+
+const short = (value: unknown, max: number, what: string): string => {
+  if (typeof value !== 'string' || value.length > max) throw new Error(`${what} expected`);
+  return value;
+};
+
+/** Shape and size only; names, policy and variables are validated by the core. */
+function hookInput(value: unknown): HookInput {
+  const v = value as Record<string, unknown> | null;
+  if (!v || typeof v !== 'object') throw new Error('hook expected');
+  const env = v['env'];
+  if (!Array.isArray(env) || env.length > 100) throw new Error('environment rows expected');
+  const rows = env.map((row: unknown) => {
+    if (!Array.isArray(row) || row.length !== 2) throw new Error('environment row expected');
+    return [short(row[0], 200, 'variable name'), short(row[1], 4000, 'variable value')] as const;
+  });
+  const stage = short(v['stage'], 20, 'stage');
+  if (typeof v['reduce'] !== 'boolean') throw new Error('reduce expected');
+  return {
+    name: short(v['name'], 100, 'hook name'),
+    description: short(v['description'], 2000, 'description'),
+    run: short(v['run'], 8000, 'command'),
+    // An unknown stage reaches the core, which reports it at the field.
+    stage,
+    env: rows,
+    reduce: v['reduce'],
+  };
+}
+
 function decision(value: unknown): GateDecision {
   const v = value as Partial<GateDecision> | null;
   if (!v || (v.outcome !== 'ok' && v.outcome !== 'changes_requested' && v.outcome !== 'rejected')) throw new Error('decision expected');
@@ -148,6 +186,8 @@ const providers = new ProviderService({
   onRunners: (runners) => manager.useRunners(runners),
   onProbe: (id, state) => window?.webContents.send('warband:probe', id, state),
 });
+
+const hooks = new HookService({ reslop: () => reslop });
 
 const manager = new RunManager({
   runners: providers.runners,
@@ -228,6 +268,18 @@ function registerIpc(): void {
   handle('probe', (id) => providers.probe(runnerId(id)));
   handle('cancelProbe', () => providers.cancelProbe());
   handle('runnerDocs', (section) => providers.docs(text(section, 'section')));
+  handle('hooks', async (root) => {
+    const project = await knownProject(root);
+    watchWorkspace(project);
+    return hooks.view(project);
+  });
+  handle('saveHook', async (root, input, original, version) =>
+    hooks.save(await knownProject(root), hookInput(input), original === null ? undefined : hookName(original), text(version, 'version')),
+  );
+  handle('deleteHook', async (root, name, version) => hooks.remove(await knownProject(root), hookName(name), text(version, 'version')));
+  handle('trialRequest', async (root, input) => hooks.request(await knownProject(root), hookInput(input)));
+  handle('trialHook', async (root, input, confirmed) => hooks.trial(await knownProject(root), hookInput(input), short(confirmed, 9000, 'confirmed command')));
+  handle('cancelTrial', () => hooks.cancelTrial());
   handle('openPath', async (path) => {
     const target = text(path, 'path');
     if (existsSync(target)) await shell.openPath(target);
@@ -272,10 +324,10 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-navigate', (event) => event.preventDefault());
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
-  // WARBAND_OPEN_RUN=<run id> opens that run's page at start; WARBAND_OPEN_VIEW=providers opens that screen.
+  // WARBAND_OPEN_RUN=<run id> opens that run's page at start; WARBAND_OPEN_VIEW=providers or hooks opens that screen.
   const openRun = process.env['WARBAND_OPEN_RUN'];
   const openView = process.env['WARBAND_OPEN_VIEW'];
-  const hash = openRun ? `run=${openRun}` : openView === 'providers' ? 'view=providers' : '';
+  const hash = openRun ? `run=${openRun}` : openView === 'providers' || openView === 'hooks' ? `view=${openView}` : '';
   if (devUrl) await window.loadURL(hash ? `${devUrl}#${hash}` : devUrl);
   else await window.loadFile(join(here, '../renderer/index.html'), hash ? { hash } : {});
 
@@ -307,6 +359,42 @@ async function watchProviders(): Promise<void> {
   });
 }
 
+/*
+ * Tells the window when the open project's .warband changes on disk: hooks,
+ * agents or skills edited by hand, by the wizard, or by another window.
+ * Runs and worktrees under .warband are left out; they change all the time.
+ */
+let workspaceWatch: { root: string; watcher: FSWatcher } | undefined;
+function watchWorkspace(root: string): void {
+  if (workspaceWatch?.root === root) return;
+  workspaceWatch?.watcher.close();
+  workspaceWatch = undefined;
+  let timer: NodeJS.Timeout | undefined;
+  const changed = (): void => {
+    clearTimeout(timer);
+    timer = setTimeout(() => window?.webContents.send('warband:workspace-changed', root), 200);
+  };
+  const dir = join(root, '.warband');
+  try {
+    const watcher = existsSync(dir)
+      ? watch(dir, { recursive: true }, (_event, file) => {
+          const path = String(file ?? '').replaceAll('\\', '/');
+          if (path === 'hooks.json' || path.startsWith('agents') || path.startsWith('skills')) changed();
+        })
+      : // No .warband yet: wait for it to appear, then watch inside it.
+        watch(root, (_event, file) => {
+          if (file !== '.warband' || !existsSync(dir)) return;
+          workspaceWatch?.watcher.close();
+          workspaceWatch = undefined;
+          watchWorkspace(root);
+          changed();
+        });
+    workspaceWatch = { root, watcher };
+  } catch {
+    // A folder that cannot be watched only loses the live refresh.
+  }
+}
+
 app.whenReady().then(async () => {
   if (process.platform === 'darwin') app.dock?.setIcon(join(here, '../../build/icon.png'));
   await providers.load();
@@ -325,6 +413,7 @@ app.on('window-all-closed', () => app.quit());
 let quitting = false;
 app.on('before-quit', (event) => {
   providers.cancelProbe();
+  hooks.cancelTrial();
   if (quitting || manager.activeCount === 0) return;
   event.preventDefault();
   quitting = true;

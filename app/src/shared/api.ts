@@ -5,7 +5,8 @@
  * bundle does not pull in engine code.
  */
 import type { AgentDefinition } from '../../../src/core/agents.ts';
-import type { Hook } from '../../../src/core/hooks.ts';
+import type { Hook, HookProblem } from '../../../src/core/hooks.ts';
+import type { HookInput } from '../../../src/core/workspace.ts';
 import type { EngineEvent, GateDecision } from '../../../src/engine/run.ts';
 import type { Finding } from '../../../src/engine/plan-file.ts';
 import type { ProtectedChange } from '../../../src/core/protected.ts';
@@ -20,6 +21,8 @@ export type {
   Finding,
   GateDecision,
   Hook,
+  HookInput,
+  HookProblem,
   LocalCheck,
   LoginState,
   Mismatch,
@@ -134,6 +137,65 @@ export type SaveProviderResult =
   | { ok: false; changed: true }
   | { ok: false; error: string };
 
+/** One hook of the project, with the agents that use it. */
+export interface HookInfo {
+  hook: Hook;
+  /** Agents whose hook list has this hook; absent when the agent files could not be read. */
+  usedBy?: string[];
+}
+
+export interface HooksView {
+  hooks: HookInfo[];
+  /** Version of hooks.json, passed back on save and delete. */
+  version: string;
+  /** The project's .warband folder, which {warband} in a command stands for. */
+  warbandDir: string;
+  /** Path of reslop when it is on PATH. */
+  reslop?: string;
+  /** hooks.json could not be read. */
+  error?: string;
+  /** The agent files could not be read, so "used by" is unknown. */
+  agentsError?: string;
+}
+
+export type SaveHookResult =
+  | { ok: true; version: string; name: string }
+  | { ok: false; problems: HookProblem[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+export type DeleteHookResult =
+  | { ok: true; version: string }
+  | { ok: false; usedBy: string[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+/** What a trial run would execute, shown to the person before it runs. */
+export interface TrialRequest {
+  /** The exact command line given to the shell. */
+  command: string;
+  cwd: string;
+  env: Record<string, string>;
+  /** Run through reslop for a short report. */
+  reduced: boolean;
+}
+
+export type TrialResult =
+  | { status: 'invalid'; problems: HookProblem[] }
+  | { status: 'refused'; error: string }
+  | {
+      status: 'finished' | 'cancelled';
+      command: string;
+      cwd: string;
+      ok: boolean;
+      exitCode: number | null;
+      timedOut: boolean;
+      reduced: boolean;
+      seconds: number;
+      /** Last lines of stdout and stderr together. */
+      output: string[];
+    };
+
 export interface AppState {
   projects: string[];
   current?: string;
@@ -167,6 +229,17 @@ export interface WarbandApi {
   onProbe(listener: (id: RunnerId, state: ProbeState) => void): () => void;
   /** providers.json changed on disk. */
   onProvidersChanged(listener: () => void): () => void;
+  hooks(root: string): Promise<HooksView>;
+  /** `original`: the name the hook had when the form opened; null for a new hook. */
+  saveHook(root: string, input: HookInput, original: string | null, version: string): Promise<SaveHookResult>;
+  deleteHook(root: string, name: string, version: string): Promise<DeleteHookResult>;
+  /** The exact command line, folder and variables a trial run of the form would use, or why it cannot run. */
+  trialRequest(root: string, input: HookInput): Promise<TrialRequest | { problems: HookProblem[] }>;
+  /** Runs the hook as the form has it in the project checkout; `confirmed` is the command the person accepted. */
+  trialHook(root: string, input: HookInput, confirmed: string): Promise<TrialResult>;
+  cancelTrial(): Promise<void>;
+  /** Something in the project's .warband changed on disk (hooks.json, agents, skills). */
+  onWorkspaceChanged(listener: (root: string) => void): () => void;
   /** Live events of every active run. Returns an unsubscribe function. */
   onEvent(listener: (runId: string, event: TimedEvent) => void): () => void;
 }

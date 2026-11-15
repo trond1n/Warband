@@ -4,11 +4,12 @@ import type { ReactNode } from 'react';
 import type { AppState, ProjectInfo, RunSummary } from '../shared/api.ts';
 import { useConfirm } from './Dialog.tsx';
 import { dayLabel, STAGE_LABEL, STATUS_LABEL } from './model.ts';
+import { HooksView } from './Hooks.tsx';
 import { ProvidersView } from './Providers.tsx';
 import type { LeaveGuard } from './Providers.tsx';
 import { RunView } from './RunView.tsx';
 
-type View = { kind: 'new' } | { kind: 'run'; runId: string } | { kind: 'project' } | { kind: 'providers' };
+type View = { kind: 'new' } | { kind: 'run'; runId: string } | { kind: 'project' } | { kind: 'providers' } | { kind: 'hooks' };
 
 /** Events that change what the run list shows. */
 const LIST_EVENTS = new Set(['run_started', 'stage', 'gate_open', 'gate', 'run_finished']);
@@ -20,7 +21,8 @@ export function App(): ReactNode {
   const [view, setView] = useState<View>(() => {
     const run = /^#run=(.+)$/.exec(window.location.hash)?.[1];
     if (run) return { kind: 'run', runId: decodeURIComponent(run) };
-    return window.location.hash === '#view=providers' ? { kind: 'providers' } : { kind: 'new' };
+    if (window.location.hash === '#view=providers') return { kind: 'providers' };
+    return window.location.hash === '#view=hooks' ? { kind: 'hooks' } : { kind: 'new' };
   });
   const [collapsed, setCollapsed] = useState(false);
   const root = state?.current;
@@ -97,6 +99,8 @@ export function App(): ReactNode {
           <ProvidersView setGuard={setGuard} onSaved={async () => setState(await window.warband.state())} />
         ) : !root ? (
           <Welcome onAdd={async () => setState(await window.warband.addProject())} />
+        ) : view.kind === 'hooks' ? (
+          <HooksView key={root} root={root} setGuard={setGuard} />
         ) : view.kind === 'run' ? (
           <RunView key={view.runId} root={root} runId={view.runId} project={project} onChanged={refresh} />
         ) : view.kind === 'project' ? (
@@ -176,6 +180,9 @@ function Sidebar(props: {
       <h2 className="group">Настройка</h2>
       <button className={`nav${view.kind === 'providers' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'providers' })}>
         Провайдеры
+      </button>
+      <button className={`nav${view.kind === 'hooks' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'hooks' })} disabled={!state.current}>
+        Хуки
       </button>
       <button className={`nav${view.kind === 'project' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'project' })} disabled={!state.current}>
         Проект: агенты и хуки

@@ -8,6 +8,8 @@ export interface ConfirmOptions {
   confirm: string;
   cancel?: string;
   danger?: boolean;
+  /** Only the confirm button: a message to acknowledge, not a question. */
+  single?: boolean;
 }
 
 /**
@@ -86,10 +88,12 @@ function Modal({ options, onClose }: { options: ConfirmOptions; onClose(ok: bool
         <h2 id="modal-title">{options.title}</h2>
         <div className="modal-body">{options.body}</div>
         <div className="row end">
-          <button ref={cancelRef} className="button" onClick={() => onClose(false)}>
-            {options.cancel ?? 'Отмена'}
-          </button>
-          <button className={`button ${options.danger ? 'danger' : 'primary'}`} onClick={() => onClose(true)}>
+          {!options.single && (
+            <button ref={cancelRef} className="button" onClick={() => onClose(false)}>
+              {options.cancel ?? 'Отмена'}
+            </button>
+          )}
+          <button ref={options.single ? cancelRef : undefined} className={`button ${options.danger ? 'danger' : 'primary'}`} onClick={() => onClose(true)}>
             {options.confirm}
           </button>
         </div>

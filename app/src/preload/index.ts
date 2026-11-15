@@ -29,6 +29,17 @@ const api: WarbandApi = {
   probe: call('probe'),
   cancelProbe: call('cancelProbe'),
   runnerDocs: call('runnerDocs'),
+  hooks: call('hooks'),
+  saveHook: call('saveHook'),
+  deleteHook: call('deleteHook'),
+  trialRequest: call('trialRequest'),
+  trialHook: call('trialHook'),
+  cancelTrial: call('cancelTrial'),
+  onWorkspaceChanged(listener) {
+    const wrapped = (_: unknown, root: string): void => listener(root);
+    ipcRenderer.on('warband:workspace-changed', wrapped);
+    return () => ipcRenderer.removeListener('warband:workspace-changed', wrapped);
+  },
   onProbe(listener) {
     const wrapped = (_: unknown, id: RunnerId, state: ProbeState): void => listener(id, state);
     ipcRenderer.on('warband:probe', wrapped);
