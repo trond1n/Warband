@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
@@ -8,7 +8,7 @@ import { providersFile } from '../../../src/core/providers.ts';
 import type { Providers } from '../../../src/core/providers.ts';
 import type { Runner, RunnerEvent, RunnerId, RunRequest } from '../../../src/core/runner.ts';
 import { RUNNER_IDS, RUNNERS } from '../../../src/runners/registry.ts';
-import type { Probe } from '../../../scripts/spike/probes.ts';
+import type { Probe, Recorded } from '../../../scripts/spike/probes.ts';
 import type { ProbeState } from '../shared/api.ts';
 import { docSection, ProviderService } from './providers.ts';
 
@@ -26,6 +26,10 @@ after(async () => {
 
 interface Script {
   installed?: readonly RunnerId[];
+  /** Version every installed CLI reports; "<id> 1.0" by default. */
+  version?: string;
+  /** Text each probe run answers with. */
+  answer?: string;
   /** Waits before each run, so a test can look at a probe in progress. */
   gate?: () => Promise<void>;
   requests?: RunRequest[];
@@ -44,12 +48,13 @@ function scripted(script: Script): (providers: Providers) => Record<RunnerId, Ru
           displayName: real.displayName,
           binary: providers[id]?.binary ?? real.binary,
           capabilities: real.capabilities,
-          detect: async () => (found ? { found: true, version: `${id} 1.0` } : { found: false }),
+          ...(providers[id]?.check ? { localCheck: providers[id]?.check } : {}),
+          detect: async () => (found ? { found: true, version: script.version ?? `${id} 1.0` } : { found: false }),
           ...(id === 'claude' ? { login: async () => ({ state: 'in' as const, method: 'claude.ai' }) } : {}),
           async *run(request: RunRequest): AsyncGenerator<RunnerEvent> {
             script.requests?.push(request);
             await script.gate?.();
-            yield { type: 'text', text: 'pong' };
+            yield { type: 'text', text: script.answer ?? 'pong' };
             yield { type: 'done', exitCode: 0, timedOut: false };
           },
         },
@@ -200,4 +205,53 @@ test('docSection stops at the next second-level heading', () => {
   assert.equal(docSection(md, 'A'), 'text\n### Sub\nmore');
   assert.equal(docSection(md, 'B'), 'other');
   assert.equal(docSection(md, 'C'), undefined);
+});
+
+/** Recorded results for the two test probes: pong answers, read does not find its word. */
+const RECORDED_TEST: Partial<Record<RunnerId, Recorded>> = {
+  claude: { on: '2.1.325', probes: { pong: { answer: 'yes', exit: '0' }, read: { answer: 'no', exit: '0' } } as Recorded['probes'] },
+};
+
+test('a full run that matches the recorded results makes the installed version count as checked here', async () => {
+  let swapped: Record<RunnerId, Runner> | undefined;
+  const { svc, dir } = await service({ version: '2.1.330 (Claude Code)' }, { recorded: RECORDED_TEST, onRunners: (r) => (swapped = r) });
+  const before = await svc.view();
+  assert.equal(before.providers[0]?.drift.kind, 'differs');
+
+  const final = await svc.probe('claude');
+  assert.deepEqual(final.mismatches, []);
+  assert.deepEqual(final.check?.differs, []);
+  assert.equal(swapped?.claude.localCheck?.version, '2.1.330 (Claude Code)', 'runs use the new check');
+
+  const after = await svc.view();
+  assert.equal(after.providers[0]?.drift.kind, 'checked');
+  assert.equal(after.version, before.version, 'an open form does not go stale');
+  const file = JSON.parse(await readFile(providersFile(dir), 'utf8'));
+  assert.equal(file.providers.claude.check.version, '2.1.330 (Claude Code)');
+  assert.ok(!('check' in (file.providers.antigravity ?? {})), 'only the probed CLI');
+});
+
+test('a probe that differs keeps the warning and names the probe', async () => {
+  const { svc } = await service({ version: '2.1.330', answer: 'heron' }, { recorded: RECORDED_TEST });
+  const final = await svc.probe('claude');
+  assert.deepEqual(final.check?.differs, ['pong', 'read']);
+  assert.deepEqual(final.mismatches?.map((m) => [m.probe, m.field, m.actual]), [
+    ['pong', 'answer', 'no'],
+    ['read', 'answer', 'yes'],
+  ]);
+  const drift = (await svc.view()).providers[0]?.drift;
+  assert.deepEqual(drift, { kind: 'differs', verifiedOn: '2.1.325', installed: '2.1.330', newer: true, failed: ['pong', 'read'] });
+});
+
+test('a stopped run is not remembered', async () => {
+  let release: () => void = () => {};
+  const { svc, dir } = await service({ version: '2.1.330', gate: () => new Promise<void>((r) => (release = r)) }, { recorded: RECORDED_TEST });
+  const running = svc.probe('claude');
+  await new Promise((r) => setTimeout(r, 20));
+  svc.cancelProbe();
+  release();
+  const final = await running;
+  assert.equal(final.check, undefined);
+  assert.equal((await svc.view()).version, 'none');
+  await assert.rejects(readFile(providersFile(dir), 'utf8'), /ENOENT/);
 });

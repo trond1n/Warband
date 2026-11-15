@@ -195,8 +195,9 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     const runner = runners[roles[role].runner];
     const detection = await runner.detect();
     if (!detection.found) throw new Error(`${runner.displayName} (${role}) is not installed`);
-    // A CLI that updated itself since its adapter was verified is reported once, not blocked.
-    const drift = driftMessage(runner.displayName, runner.id, versionDrift(runner.capabilities, detection.version));
+    // A CLI that updated itself since its adapter was verified is reported once, not blocked,
+    // unless the probes have passed on that version on this machine.
+    const drift = driftMessage(runner.displayName, runner.id, versionDrift(runner.capabilities, detection.version, true, runner.localCheck));
     if (drift && !driftReported.has(runner.id)) {
       driftReported.add(runner.id);
       report({ type: 'warning', message: drift });

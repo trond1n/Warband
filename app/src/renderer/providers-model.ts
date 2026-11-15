@@ -1,4 +1,4 @@
-import type { Capabilities, LoginState, ProbeResult, ProviderProblem, ProviderSettings, RunnerId, VersionDrift } from '../shared/api.ts';
+import type { Capabilities, LocalCheck, LoginState, Mismatch, ProbeResult, ProviderProblem, ProviderSettings, RunnerId, VersionDrift } from '../shared/api.ts';
 
 /*
  * Labels and form logic for the "Провайдеры" screen, kept apart from React
@@ -25,14 +25,25 @@ export function loginLabel(login: LoginState, found: boolean): string {
   return 'неизвестно: CLI сам этого не сообщает';
 }
 
-/** What the card says about the adapter, with the version it was verified on. */
-export function adapterLabel(capabilities: Capabilities): string {
+/**
+ * What the card says about the adapter: the version it was verified on (in
+ * the code), and apart from it the version the probes last passed on here.
+ */
+export function adapterLabel(capabilities: Capabilities, check?: LocalCheck): string {
   if (!capabilities.verified) return 'не подтверждён: поведение без человека не проверено';
-  return capabilities.verifiedOn ? `подтверждён пробами на версии ${capabilities.verifiedOn}` : 'подтверждён пробами';
+  const base = capabilities.verifiedOn ? `подтверждён на ${capabilities.verifiedOn}` : 'подтверждён пробами';
+  const local = check && check.differs.length === 0 ? `, на этой машине пробы прошли на ${shortVersion(check.version)}` : '';
+  return `${base}${local}`;
 }
+
+/** "2.1.330 (Claude Code)" -> "2.1.330". */
+const shortVersion = (text: string): string => /\d+(?:\.\d+)+/.exec(text)?.[0] ?? text;
 
 /** A warning when the installed CLI is not the version its adapter was verified on; undefined when there is none. */
 export function driftText(drift: VersionDrift): string | undefined {
+  if (drift.kind === 'differs' && drift.failed) {
+    return `Установлена версия ${drift.installed}, а адаптер подтверждён на ${drift.verifiedOn}. Пробы на этой версии дали другой результат: ${drift.failed.join(', ')}. Поведение без человека изменилось, сверьтесь с docs/runners.md. Прогоны это не блокирует.`;
+  }
   if (drift.kind === 'differs') {
     return `Установлена версия ${drift.installed}, а адаптер подтверждён на ${drift.verifiedOn}${drift.newer ? '' : ' (установленная старше)'}. Поведение без человека могло измениться: запустите пробы. Прогоны это не блокирует.`;
   }
@@ -115,4 +126,25 @@ export function probeRow(result: ProbeResult): { probe: string; about: string; a
     seconds: result.seconds,
     cleanup: result.cleanup === 'ok' ? 'ok' : result.cleanup,
   };
+}
+
+const FIELD_LABEL: Record<Mismatch['field'], string> = { answer: 'ответ', file: 'файл', exit: 'выход', missing: 'проба' };
+const VALUE_LABEL: Record<string, string> = { yes: 'да', no: 'нет', '': 'нет данных', run: 'запущена', 'not run': 'не запущена' };
+const valueLabel = (value: string): string => VALUE_LABEL[value] ?? value;
+
+/** How one probe compares with the results the adapter was verified with; undefined when nothing was compared. */
+export function matchText(mismatches: readonly Mismatch[] | undefined, probe: string): string | undefined {
+  if (!mismatches) return undefined;
+  const own = mismatches.filter((m) => m.probe === probe);
+  if (own.length === 0) return 'совпадает';
+  return own.map((m) => `${FIELD_LABEL[m.field]}: ${valueLabel(m.actual)}, записано ${valueLabel(m.expected)}`).join('; ');
+}
+
+/** The line under the probe table after a full run on a verified CLI. */
+export function checkText(check: LocalCheck | undefined): string | undefined {
+  if (!check) return undefined;
+  if (check.differs.length === 0) {
+    return `Все пробы совпали с результатами, на которых подтверждён адаптер. Версия ${shortVersion(check.version)} запомнена как проверенная на этой машине: предупреждения о ней не будет.`;
+  }
+  return `Отличаются: ${check.differs.join(', ')}. Версия ${shortVersion(check.version)} не считается проверенной, предупреждение остаётся.`;
 }

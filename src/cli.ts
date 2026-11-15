@@ -66,7 +66,7 @@ async function doctor(): Promise<number> {
     RUNNER_IDS.map(async (id) => {
       const runner = runners[id];
       const detection = await runner.detect();
-      const drift = versionDrift(runner.capabilities, detection.version, detection.found);
+      const drift = versionDrift(runner.capabilities, detection.version, detection.found, runner.localCheck);
       const driftNote = driftMessage(runner.displayName, id, drift);
       if (driftNote) drifts.push(driftNote);
       return {
@@ -81,7 +81,11 @@ async function doctor(): Promise<number> {
           ? providers[id]?.binary
             ? 'cannot start the set binary'
             : 'not on PATH'
-          : drift.kind === 'differs'
+          : drift.kind === 'checked'
+            ? `probes passed here on ${drift.installed}`
+            : drift.kind === 'differs' && drift.failed
+            ? `probes differ here: ${drift.failed.join(', ')}`
+            : drift.kind === 'differs'
             ? `version differs from verified ${drift.verifiedOn}`
             : drift.kind === 'unknown'
               ? 'version not comparable'

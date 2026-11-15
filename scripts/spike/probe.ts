@@ -35,10 +35,15 @@
  * Raw output is saved to spike-output/<id>.<probe>.log (gitignored) so the
  * event schema can be read off real data instead of guessed.
  *
+ * A run of every probe on a verified CLI is compared with the results its
+ * adapter was verified with (RECORDED in probes.ts) and remembered in the
+ * machine settings, so a version that passed here is not reported as drift.
+ *
  * Each probe is a real model call and spends a little subscription quota.
  */
+import { configDir, recordCheck } from '../../src/core/providers.ts';
 import { configuredRunners, RUNNER_IDS } from '../../src/runners/registry.ts';
-import { PROBES, runProbe } from './probes.ts';
+import { localCheck, PROBES, RECORDED, runProbe } from './probes.ts';
 import type { ProbeResult } from './probes.ts';
 
 const OUTPUT_DIR = 'spike-output';
@@ -60,18 +65,29 @@ if (selected.length === 0 || probes.length === 0) {
   process.exitCode = 2;
 } else {
   const results: ProbeResult[] = [];
+  const notes: string[] = [];
   for (const runner of selected) {
     const detection = await runner.detect();
     if (!detection.found) {
       console.log(`Skipping ${runner.displayName}: not installed.`);
       continue;
     }
+    const own: ProbeResult[] = [];
     for (const probe of probes) {
       console.log(`Probing ${runner.displayName} (${probe.name})...`);
-      results.push(await runProbe(runner, detection.version ?? '', probe, { logDir: OUTPUT_DIR }));
+      own.push(await runProbe(runner, detection.version ?? '', probe, { logDir: OUTPUT_DIR }));
+    }
+    results.push(...own);
+    // A full run is remembered in the machine settings, as the window does (docs/runners.md, "Version drift").
+    const local = localCheck(RECORDED[runner.id], detection.version ?? '', own);
+    if (local) {
+      await recordCheck(configDir(), runner.id, local.check);
+      for (const m of local.mismatches) notes.push(`${runner.displayName} ${m.probe}: ${m.field} ${m.actual || '(none)'}, recorded ${m.expected}`);
+      if (local.mismatches.length === 0) notes.push(`${runner.displayName}: every probe matched the recorded results; ${detection.version} counts as checked on this machine.`);
     }
   }
   console.table(results);
+  for (const note of notes) console.log(note);
   console.log(`Raw output: ${OUTPUT_DIR}/<id>.<probe>.log`);
   console.log('A healthy headless contract: stdout lines > 0, saw answer = yes, exit = 0.');
 }

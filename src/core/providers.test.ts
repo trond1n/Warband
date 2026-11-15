@@ -12,6 +12,7 @@ import {
   ProvidersChangedError,
   providersFile,
   readProviders,
+  recordCheck,
   saveProvider,
   validateProvider,
 } from './providers.ts';
@@ -125,4 +126,30 @@ test('a broken or misshapen file is reported with its path', async () => {
   await assert.rejects(loadProviders(dir), /providers\.claude\.models must be a list/);
   await writeFile(providersFile(dir), '{"providers": {"someday": {"models": []}}}');
   assert.deepEqual(await loadProviders(dir), {}, 'unknown CLIs are ignored');
+});
+
+test('a probe run is recorded per CLI, kept by a form save, and does not make an open form stale', async () => {
+  const dir = await folder();
+  const first = await saveProvider(dir, 'claude', { models: ['opus'] }, 'none');
+  const check = { version: '2.1.330', at: '2026-11-15T10:00:00.000Z', differs: [] };
+  const recorded = await recordCheck(dir, 'claude', check);
+  assert.equal(recorded.version, first.version, 'path and models did not change');
+  assert.deepEqual((await loadProviders(dir)).claude, { models: ['opus'], check });
+
+  // The form was read before the probes ran; its save still goes through and keeps the check.
+  await saveProvider(dir, 'claude', { models: ['opus', 'sonnet'] }, first.version);
+  assert.deepEqual((await loadProviders(dir)).claude, { models: ['opus', 'sonnet'], check });
+  // Clearing the form keeps the entry while it holds a check.
+  const cleared = await saveProvider(dir, 'claude', { models: [] }, (await readProviders(dir)).version);
+  assert.deepEqual(cleared.providers.claude, { models: [], check });
+
+  // A CLI with no settings yet gets an entry with the check only.
+  await recordCheck(dir, 'antigravity', { ...check, version: '1.5.9', differs: ['write'] });
+  assert.deepEqual((await loadProviders(dir)).antigravity, { models: [], check: { ...check, version: '1.5.9', differs: ['write'] } });
+});
+
+test('a check in the file that is not well formed is an error, not ignored', async () => {
+  const dir = await folder();
+  await writeFile(providersFile(dir), JSON.stringify({ providers: { claude: { models: [], check: { version: 1 } } } }));
+  await assert.rejects(readProviders(dir), /providers\.claude\.check must be/);
 });

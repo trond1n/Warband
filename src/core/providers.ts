@@ -4,13 +4,13 @@ import { homedir } from 'node:os';
 import { dirname, extname, isAbsolute, join } from 'node:path';
 
 import { KNOWN_RUNNER_IDS } from './runner.ts';
-import type { RunnerId } from './runner.ts';
+import type { LocalCheck, RunnerId } from './runner.ts';
 
 /*
  * Per-machine settings for each agent CLI ("provider"), kept outside any
  * project because they describe this computer, not the code:
  *
- *   <config dir>/providers.json   { "providers": { "claude": { "binary": "...", "models": [...] } } }
+ *   <config dir>/providers.json   { "providers": { "claude": { "binary": "...", "models": [...], "check": {...} } } }
  *
  * The config dir is the one the desktop window uses for its own settings
  * (Electron's userData for the app name "Warband"), so `warband doctor`,
@@ -25,6 +25,11 @@ export interface ProviderSettings {
   binary?: string;
   /** Model ids the person keeps for this CLI, offered when an agent is set up. */
   models: string[];
+  /**
+   * The last full probe run on this machine. Written by the probes (window or
+   * `npm run spike`), never by the settings form; a save keeps it.
+   */
+  check?: LocalCheck;
 }
 
 export type Providers = Partial<Record<RunnerId, ProviderSettings>>;
@@ -96,9 +101,31 @@ export async function validateProvider(settings: ProviderSettings, platform: Nod
   return problems;
 }
 
-/** Content hash of the settings file, so a save can tell that the file changed under it. */
-const versionOf = (text: string | undefined): string =>
-  text === undefined ? 'none' : createHash('sha256').update(text).digest('hex').slice(0, 16);
+/**
+ * Hash of what a person edits (path and models), so a save can tell that the
+ * settings changed under it. A probe run recording its result does not count:
+ * it must not make an open form stale.
+ */
+function versionOf(providers: Providers | undefined): string {
+  const editable = KNOWN_RUNNER_IDS.flatMap((id) => {
+    const item = providers?.[id];
+    return item && (item.binary !== undefined || item.models.length > 0) ? [[id, item.binary ?? null, item.models]] : [];
+  });
+  if (editable.length === 0) return 'none';
+  return createHash('sha256').update(JSON.stringify(editable)).digest('hex').slice(0, 16);
+}
+
+function parseCheck(value: unknown, where: string): LocalCheck {
+  if (
+    !isObject(value) ||
+    typeof value['version'] !== 'string' ||
+    typeof value['at'] !== 'string' ||
+    !(Array.isArray(value['differs']) && value['differs'].every((d) => typeof d === 'string'))
+  ) {
+    throw new Error(`${where} must be { "version": "...", "at": "...", "differs": [...] }`);
+  }
+  return { version: value['version'], at: value['at'], differs: [...(value['differs'] as string[])] };
+}
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -122,7 +149,8 @@ export function parseProviders(text: string, where: string): Providers {
     if (models !== undefined && !(Array.isArray(models) && models.every((m) => typeof m === 'string'))) {
       throw new Error(`${where} providers.${id}.models must be a list of model ids`);
     }
-    providers[id] = normalizeProvider({ binary, models });
+    const check = item['check'] === undefined ? undefined : parseCheck(item['check'], `${where} providers.${id}.check`);
+    providers[id] = { ...normalizeProvider({ binary, models }), ...(check ? { check } : {}) };
   }
   return providers;
 }
@@ -138,14 +166,15 @@ async function readText(path: string): Promise<string | undefined> {
 
 export interface ProvidersSnapshot {
   providers: Providers;
-  /** Changes whenever the file does; pass it back to `saveProvider`. */
+  /** Changes whenever a path or model list does; pass it back to `saveProvider`. */
   version: string;
 }
 
 export async function readProviders(dir: string): Promise<ProvidersSnapshot> {
   const path = providersFile(dir);
   const text = await readText(path);
-  return { providers: text === undefined ? {} : parseProviders(text, path), version: versionOf(text) };
+  const providers = text === undefined ? undefined : parseProviders(text, path);
+  return { providers: providers ?? {}, version: versionOf(providers) };
 }
 
 export async function loadProviders(dir: string): Promise<Providers> {
@@ -188,13 +217,30 @@ export async function saveProvider(
   const path = providersFile(dir);
   const text = await readText(path);
   // A broken file is reported as broken, even when it also changed: it has to be fixed by hand.
-  const providers = text === undefined ? {} : parseProviders(text, path);
-  if (expectedVersion !== undefined && versionOf(text) !== expectedVersion) throw new ProvidersChangedError();
-  if (settings.binary === undefined && settings.models.length === 0) delete providers[id];
-  else providers[id] = settings;
+  const found = text === undefined ? undefined : parseProviders(text, path);
+  if (expectedVersion !== undefined && versionOf(found) !== expectedVersion) throw new ProvidersChangedError();
+  const providers = found ?? {};
+  const check = providers[id]?.check;
+  if (settings.binary === undefined && settings.models.length === 0 && !check) delete providers[id];
+  else providers[id] = { ...settings, ...(check ? { check } : {}) };
+  return writeProviders(path, providers);
+}
 
-  const next = `${JSON.stringify({ providers }, null, 2)}\n`;
+async function writeProviders(path: string, providers: Providers): Promise<ProvidersSnapshot> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, next);
-  return { providers, version: versionOf(next) };
+  await writeFile(path, `${JSON.stringify({ providers }, null, 2)}\n`);
+  return { providers, version: versionOf(providers) };
+}
+
+/**
+ * Records a full probe run for one CLI, replacing the previous one and
+ * keeping its path and models. Not a form save, so there is no version
+ * check, and the version (which covers only path and models) stays the same.
+ */
+export async function recordCheck(dir: string, id: RunnerId, check: LocalCheck): Promise<ProvidersSnapshot> {
+  const path = providersFile(dir);
+  const text = await readText(path);
+  const providers = text === undefined ? {} : parseProviders(text, path);
+  providers[id] = { ...(providers[id] ?? { models: [] }), check: parseCheck(check, 'check') };
+  return writeProviders(path, providers);
 }

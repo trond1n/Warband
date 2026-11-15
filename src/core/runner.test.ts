@@ -143,3 +143,20 @@ test('version drift: any difference against the verified version counts, and onl
   assert.match(driftMessage('Claude Code', 'claude', versionDrift(caps, '2.1.330')) ?? '', /is 2\.1\.330, but its adapter was verified on 2\.1\.325.*npm run spike -- claude/);
   assert.equal(driftMessage('Claude Code', 'claude', versionDrift(caps, '2.1.325')), undefined);
 });
+
+test('a version the probes passed on here is not reported; one where a probe differed names the probe', () => {
+  const caps = { transport: 'stream', structuredOutput: true, sandbox: 'agent', headlessApprovals: 'deny', verified: true, verifiedOn: '2.1.325' } as const;
+  const passed = { version: '2.1.330 (Claude Code)', at: '2026-11-15T10:00:00.000Z', differs: [] };
+  assert.deepEqual(versionDrift(caps, '2.1.330 (Claude Code)', true, passed), { kind: 'checked', verifiedOn: '2.1.325', installed: '2.1.330', at: passed.at });
+  assert.equal(driftMessage('Claude Code', 'claude', versionDrift(caps, '2.1.330', true, passed)), undefined);
+  // The CLI updated again: the old local check says nothing about the new version.
+  assert.deepEqual(versionDrift(caps, '2.1.331', true, passed), { kind: 'differs', verifiedOn: '2.1.325', installed: '2.1.331', newer: true });
+  assert.deepEqual(versionDrift(caps, '2.1.33', true, passed).kind, 'differs', 'a prefix of the checked version is another version');
+
+  const failed = { ...passed, differs: ['write', 'outside-read'] };
+  const drift = versionDrift(caps, '2.1.330', true, failed);
+  assert.deepEqual(drift, { kind: 'differs', verifiedOn: '2.1.325', installed: '2.1.330', newer: true, failed: ['write', 'outside-read'] });
+  assert.match(driftMessage('Claude Code', 'claude', drift) ?? '', /these probes gave a different result: write, outside-read/);
+  // On the verified version itself nothing changes.
+  assert.deepEqual(versionDrift(caps, '2.1.325', true, failed), { kind: 'same', verifiedOn: '2.1.325' });
+});

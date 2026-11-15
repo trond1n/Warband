@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import type { ProbeState, ProviderInfo, ProviderProblem, ProvidersView as View, RunnerId } from '../shared/api.ts';
 import { useConfirm } from './Dialog.tsx';
 import { Markdown } from './Markdown.tsx';
-import { adapterLabel, APPROVALS_LABEL, DOCS_SECTION, driftText, formOf, isDirty, loginLabel, probeRow, problemText, SANDBOX_LABEL, settingsOf } from './providers-model.ts';
+import { adapterLabel, APPROVALS_LABEL, checkText, DOCS_SECTION, driftText, formOf, isDirty, loginLabel, matchText, probeRow, problemText, SANDBOX_LABEL, settingsOf } from './providers-model.ts';
 import type { ProviderForm } from './providers-model.ts';
 
 /*
@@ -60,7 +60,8 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
     () =>
       window.warband.onProvidersChanged(async () => {
         const next = await window.warband.providers();
-        if (next.version === versionRef.current) return;
+        // Only a probe record changed (npm run spike, or by hand): the card changes, the form does not.
+        if (next.version === versionRef.current) return setView(next);
         if (dirtyRef.current) setStale(true);
         else apply(next, selected);
       }),
@@ -71,6 +72,8 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
     () =>
       window.warband.onProbe((id, state) => {
         setView((v) => (v ? { ...v, providers: v.providers.map((p) => (p.id === id ? { ...p, probe: state } : p)) } : v));
+        // A full run was remembered: the card and the warning change, the form does not.
+        if (state.check) void window.warband.providers().then((next) => setView(next));
       }),
     [],
   );
@@ -113,7 +116,10 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
             Будет запущено несколько проб из <code>scripts/spike</code>, по очереди, каждая во временной пустой папке. Каждая проба делает настоящий вызов
             модели и тратит лимит подписки. Это займёт от одной до нескольких минут.
           </p>
-          <p className="muted">Результат не меняет отметку «адаптер подтверждён»: она задаётся в коде после разбора проб.</p>
+          <p className="muted">
+            Отметка «адаптер подтверждён» задаётся в коде и не меняется. Если все пробы совпадут с результатами, на которых он подтверждён, установленная
+            версия запомнится как проверенная на этой машине, и предупреждение о ней пропадёт.
+          </p>
         </>
       ),
       confirm: 'Запустить пробы',
@@ -137,7 +143,7 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
               <span className="run-meta">
                 {p.found ? (p.version ?? 'установлен') : 'не найден'}
                 {p.capabilities.verified ? ' · подтверждён' : ''}
-                {p.drift.kind === 'differs' || p.drift.kind === 'unknown' ? ' · версия отличается' : ''}
+                {p.drift.kind === 'differs' || p.drift.kind === 'unknown' ? ' · версия отличается' : p.drift.kind === 'checked' ? ' · проверен здесь' : ''}
               </span>
             </span>
           </button>
@@ -177,7 +183,7 @@ export function ProvidersView({ setGuard, onSaved }: { setGuard(guard: LeaveGuar
               {current.settings.binary ? ' (путь задан здесь)' : ' (ищется в PATH)'}
             </dd>
             <dt>Адаптер</dt>
-            <dd>{adapterLabel(current.capabilities)}</dd>
+            <dd>{adapterLabel(current.capabilities, current.settings.check)}</dd>
             <dt>Песочница</dt>
             <dd>{SANDBOX_LABEL[current.capabilities.sandbox]}</dd>
             <dt>Разрешения без человека</dt>
@@ -317,6 +323,7 @@ function Probes({ info, onStart }: { info: ProviderInfo; onStart(): void }): Rea
               <th>Инструменты</th>
               <th>Выход</th>
               <th>Сек</th>
+              {state.mismatches && <th>С записанным</th>}
             </tr>
           </thead>
           <tbody>
@@ -333,12 +340,14 @@ function Probes({ info, onStart }: { info: ProviderInfo; onStart(): void }): Rea
                   <td className="small">{row.tools}</td>
                   <td>{row.exit}</td>
                   <td>{row.seconds}</td>
+                  {state.mismatches && <td className={`small${matchText(state.mismatches, row.probe) === 'совпадает' ? '' : ' error'}`}>{matchText(state.mismatches, row.probe)}</td>}
                 </tr>
               );
             })}
           </tbody>
         </table>
       )}
+      {checkText(state.check) && <p className={state.check?.differs.length ? 'error' : 'small'}>{checkText(state.check)}</p>}
       {state.finished && !state.running && (
         <p className="muted small">
           Завершено {new Date(state.finished).toLocaleString('ru-RU')}. Здоровый результат: выход 0 везде; pong, read, edit и verdict с ответом, edit создал файл; write и пробы «outside» не дают ни маркера, ни файла.

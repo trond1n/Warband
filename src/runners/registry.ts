@@ -147,7 +147,9 @@ export const RUNNER_SPECS: Record<RunnerId, CliRunnerSpec> = {
 export function createRunners(providers: Providers = {}): Record<RunnerId, Runner> {
   const entries = KNOWN_RUNNER_IDS.map((id) => {
     const spec = RUNNER_SPECS[id];
-    return [id, cliRunner({ ...spec, binary: providers[id]?.binary ?? spec.binary })] as const;
+    const settings = providers[id];
+    const runner = cliRunner({ ...spec, binary: settings?.binary ?? spec.binary });
+    return [id, settings?.check ? { ...runner, localCheck: settings.check } : runner] as const;
   });
   return Object.fromEntries(entries) as Record<RunnerId, Runner>;
 }

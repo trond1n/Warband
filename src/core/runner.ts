@@ -28,6 +28,22 @@ export interface Capabilities {
   verifiedOn?: string;
 }
 
+/**
+ * The last full set of probes run on this machine, kept in the machine
+ * settings (providers.json). When every probe gave the result recorded for
+ * the verified version, `differs` is empty and the installed version counts
+ * as checked locally: no drift warning for it. The code's `verifiedOn` is
+ * never changed by this.
+ */
+export interface LocalCheck {
+  /** The CLI version the probes ran on, as --version printed it. */
+  version: string;
+  /** ISO time of the run. */
+  at: string;
+  /** Probes whose result differed from the recorded one; empty when all matched. */
+  differs: string[];
+}
+
 /** The first dotted number in a version line, e.g. "2.1.325 (Claude Code)" -> [2, 1, 325]. */
 export function parseVersion(text: string | undefined): number[] | undefined {
   const match = /\d+(?:\.\d+)+/.exec(text ?? '');
@@ -46,11 +62,18 @@ export type VersionDrift =
   /** Nothing to compare: the adapter is not verified, or the CLI is not installed. */
   | { kind: 'none' }
   | { kind: 'same'; verifiedOn: string }
-  | { kind: 'differs'; verifiedOn: string; installed: string; newer: boolean }
+  /** The probes passed on this machine on the installed version, so it is not reported. */
+  | { kind: 'checked'; verifiedOn: string; installed: string; at: string }
+  /** `failed`: the probes ran on the installed version here and these gave a different result. */
+  | { kind: 'differs'; verifiedOn: string; installed: string; newer: boolean; failed?: string[] }
   /** The CLI did not print a version Warband can read. */
   | { kind: 'unknown'; verifiedOn: string };
 
-export function versionDrift(capabilities: Capabilities, installed: string | undefined, found = true): VersionDrift {
+const sameVersion = (a: number[] | undefined, b: number[] | undefined): boolean =>
+  a !== undefined && b !== undefined && a.length === b.length && a.every((n, i) => n === b[i]);
+
+/** `local`: the last full probe run on this machine, from the machine settings. */
+export function versionDrift(capabilities: Capabilities, installed: string | undefined, found = true, local?: LocalCheck): VersionDrift {
   const verifiedOn = capabilities.verifiedOn;
   if (!capabilities.verified || verifiedOn === undefined || !found) return { kind: 'none' };
   const want = parseVersion(verifiedOn);
@@ -60,7 +83,14 @@ export function versionDrift(capabilities: Capabilities, installed: string | und
   for (let i = 0; i < length; i++) {
     const a = have[i] ?? 0;
     const b = want[i] ?? 0;
-    if (a !== b) return { kind: 'differs', verifiedOn, installed: have.join('.'), newer: a > b };
+    if (a === b) continue;
+    const version = have.join('.');
+    // Only a run on exactly this version says anything about it.
+    if (local && sameVersion(parseVersion(local.version), have)) {
+      if (local.differs.length === 0) return { kind: 'checked', verifiedOn, installed: version, at: local.at };
+      return { kind: 'differs', verifiedOn, installed: version, newer: a > b, failed: [...local.differs] };
+    }
+    return { kind: 'differs', verifiedOn, installed: version, newer: a > b };
   }
   return { kind: 'same', verifiedOn };
 }
@@ -68,6 +98,9 @@ export function versionDrift(capabilities: Capabilities, installed: string | und
 /** One line for the terminal and the run log, or undefined when there is nothing to say. */
 export function driftMessage(name: string, id: string, drift: VersionDrift): string | undefined {
   const probe = `Run the probes to check it: npm run spike -- ${id}, or "Проверить" in the window.`;
+  if (drift.kind === 'differs' && drift.failed) {
+    return `${name} is ${drift.installed}, but its adapter was verified on ${drift.verifiedOn}, and on this machine these probes gave a different result: ${drift.failed.join(', ')}. Headless behaviour has changed; see docs/runners.md before relying on it.`;
+  }
   if (drift.kind === 'differs') {
     return `${name} is ${drift.installed}, but its adapter was verified on ${drift.verifiedOn}; headless behaviour may have changed. ${probe}`;
   }
@@ -128,6 +161,8 @@ export interface Runner {
   readonly displayName: string;
   readonly binary: string;
   readonly capabilities: Capabilities;
+  /** The last full probe run on this machine, from the machine settings. */
+  readonly localCheck?: LocalCheck;
   /** Maps this CLI's JSON lines to common events. Absent until real logs exist. */
   readonly mapRaw?: RawMapper;
   detect(): Promise<Detection>;

@@ -10,8 +10,8 @@ import type { EngineEvent, GateDecision } from '../../../src/engine/run.ts';
 import type { Finding } from '../../../src/engine/plan-file.ts';
 import type { ProtectedChange } from '../../../src/core/protected.ts';
 import type { ProviderProblem, ProviderSettings } from '../../../src/core/providers.ts';
-import type { Capabilities, LoginState, RunnerId, VersionDrift } from '../../../src/core/runner.ts';
-import type { ProbeResult } from '../../../scripts/spike/probes.ts';
+import type { Capabilities, LocalCheck, LoginState, RunnerId, VersionDrift } from '../../../src/core/runner.ts';
+import type { Mismatch, ProbeResult } from '../../../scripts/spike/probes.ts';
 
 export type {
   AgentDefinition,
@@ -20,7 +20,9 @@ export type {
   Finding,
   GateDecision,
   Hook,
+  LocalCheck,
   LoginState,
+  Mismatch,
   ProbeResult,
   ProtectedChange,
   ProviderProblem,
@@ -91,6 +93,10 @@ export interface ProbeState {
   results: ProbeResult[];
   finished?: string;
   error?: string;
+  /** A full run on a verified CLI: what was remembered on this machine. */
+  check?: LocalCheck;
+  /** Where that run differed from the results the adapter was verified with. */
+  mismatches?: Mismatch[];
 }
 
 /** One agent CLI on this machine, for the "Провайдеры" screen. */

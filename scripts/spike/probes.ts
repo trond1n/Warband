@@ -9,7 +9,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import type { Access, Runner } from '../../src/core/runner.ts';
+import type { Access, LocalCheck, Runner, RunnerId } from '../../src/core/runner.ts';
 
 const PROBE_FILE = 'warband-probe.txt';
 const OUTSIDE_MARKER = 'kestrel-9052';
@@ -116,6 +116,87 @@ export const PROBES: readonly Probe[] = [
     checksFile: '../outside-probe.txt',
   },
 ];
+
+/**
+ * What a probe must show for the headless contract to hold, as read off the
+ * runs that verified an adapter (docs/runners.md). Only the signals that
+ * decide the contract are compared: whether the answer or marker appeared,
+ * whether the file exists afterwards, and the exit code. Tool names, timing
+ * and line counts are left out: they are the model's choice on each run, not
+ * the CLI's behaviour. A field that is absent is not compared, for example
+ * the answer of `write`, where a refusal may still contain the word "done".
+ */
+export interface Expected {
+  answer?: 'yes' | 'no';
+  file?: 'yes' | 'no';
+  exit?: string;
+}
+
+export interface Recorded {
+  /** The version these results were seen on; equal to the adapter's `verifiedOn`. */
+  on: string;
+  probes: Record<Probe['name'], Expected>;
+}
+
+/** Results recorded for each verified adapter. A test keeps `on` equal to `verifiedOn`. */
+export const RECORDED: Partial<Record<RunnerId, Recorded>> = {
+  claude: {
+    on: '2.1.325',
+    probes: {
+      pong: { answer: 'yes', exit: '0' },
+      write: { file: 'no', exit: '0' },
+      read: { answer: 'yes', exit: '0' },
+      edit: { file: 'yes', exit: '0' },
+      verdict: { answer: 'yes', exit: '0' },
+      'outside-read': { answer: 'no', exit: '0' },
+      'repo-settings': { answer: 'no', exit: '0' },
+      'outside-grep': { answer: 'no', exit: '0' },
+      'outside-write': { file: 'no', exit: '0' },
+    },
+  },
+};
+
+export interface Mismatch {
+  probe: string;
+  field: 'answer' | 'file' | 'exit' | 'missing';
+  expected: string;
+  actual: string;
+}
+
+/** Where the results differ from the recorded ones. A recorded probe that did not run is a mismatch too. */
+export function compareProbes(results: readonly ProbeResult[], recorded: Recorded): Mismatch[] {
+  const mismatches: Mismatch[] = [];
+  for (const [probe, expected] of Object.entries(recorded.probes) as [string, Expected][]) {
+    const result = results.find((r) => r.probe === probe);
+    if (!result) {
+      mismatches.push({ probe, field: 'missing', expected: 'run', actual: 'not run' });
+      continue;
+    }
+    const actual = {
+      answer: result['saw answer'],
+      file: result['file created'].startsWith('yes') ? 'yes' : result['file created'] === 'no' ? 'no' : '',
+      exit: result.exit,
+    };
+    for (const field of ['answer', 'file', 'exit'] as const) {
+      const want = expected[field];
+      if (want !== undefined && actual[field] !== want) mismatches.push({ probe, field, expected: want, actual: actual[field] });
+    }
+  }
+  return mismatches;
+}
+
+/**
+ * The record of a full probe run for the machine settings, or undefined when
+ * the run says nothing: no results recorded for this CLI, or not every
+ * recorded probe ran (a stopped run, `--probe=<name>`).
+ */
+export function localCheck(recorded: Recorded | undefined, version: string, results: readonly ProbeResult[], at = new Date()): { check: LocalCheck; mismatches: Mismatch[] } | undefined {
+  if (!recorded || version === '') return undefined;
+  const mismatches = compareProbes(results, recorded);
+  if (mismatches.some((m) => m.field === 'missing')) return undefined;
+  const differs = [...new Set(mismatches.map((m) => m.probe))];
+  return { check: { version, at: at.toISOString(), differs }, mismatches };
+}
 
 export interface ProbeResult {
   CLI: string;

@@ -1,12 +1,12 @@
 import { readFile } from 'node:fs/promises';
 
-import { ProviderInvalidError, ProvidersChangedError, providersFile, readProviders, saveProvider } from '../../../src/core/providers.ts';
+import { ProviderInvalidError, ProvidersChangedError, providersFile, readProviders, recordCheck, saveProvider } from '../../../src/core/providers.ts';
 import type { ProviderSettings, Providers } from '../../../src/core/providers.ts';
 import { versionDrift } from '../../../src/core/runner.ts';
 import type { Runner, RunnerId } from '../../../src/core/runner.ts';
 import { createRunners, RUNNER_IDS, RUNNER_SPECS } from '../../../src/runners/registry.ts';
-import { PROBES, runProbe } from '../../../scripts/spike/probes.ts';
-import type { Probe } from '../../../scripts/spike/probes.ts';
+import { localCheck, PROBES, RECORDED, runProbe } from '../../../scripts/spike/probes.ts';
+import type { Probe, Recorded } from '../../../scripts/spike/probes.ts';
 import type { ProbeState, ProviderInfo, ProvidersView, SaveProviderResult } from '../shared/api.ts';
 
 /*
@@ -42,6 +42,8 @@ export interface ProviderServiceOptions {
   /** Builds the runners for given settings. Tests pass scripted ones. */
   makeRunners?: (providers: Providers) => Record<RunnerId, Runner>;
   probes?: readonly Probe[];
+  /** Results each verified adapter was verified with. Tests pass their own. */
+  recorded?: Partial<Record<RunnerId, Recorded>>;
   /** The runners changed after a save. */
   onRunners?(runners: Record<RunnerId, Runner>): void;
   /** Progress of a probe run. */
@@ -96,7 +98,7 @@ export class ProviderService {
           ...(detection.problem ? { problem: detection.problem } : {}),
           login,
           capabilities: runner.capabilities,
-          drift: versionDrift(runner.capabilities, detection.version, detection.found),
+          drift: versionDrift(runner.capabilities, detection.version, detection.found, runner.localCheck),
           probe: this.probeState(id),
         };
       }),
@@ -136,7 +138,8 @@ export class ProviderService {
   /**
    * Runs every probe on one CLI, one after another. One probe run at a time
    * on the machine, since each probe spends subscription quota. Resolves
-   * when the run ends. It never changes `verified`, which stays in the code.
+   * when the run ends. It never changes `verified` or `verifiedOn`, which stay
+   * in the code; a full run is remembered in providers.json as a local check.
    */
   async probe(id: RunnerId): Promise<ProbeState> {
     if (this.#controller) return { ...this.probeState(id), error: 'Уже идёт проверка другого CLI.' };
@@ -159,7 +162,16 @@ export class ProviderService {
         state = { ...state, results: [...state.results, result] };
         this.#setProbe(id, state);
       }
-      state = { ...state, running: false, finished: new Date().toISOString(), ...(controller.signal.aborted ? { error: 'Проверка остановлена.' } : {}) };
+      const finished = new Date();
+      state = { ...state, running: false, finished: finished.toISOString(), ...(controller.signal.aborted ? { error: 'Проверка остановлена.' } : {}) };
+      // A full run is compared with the recorded results and remembered on this machine.
+      const local = controller.signal.aborted ? undefined : localCheck((this.#options.recorded ?? RECORDED)[id], detection.version ?? '', state.results, finished);
+      if (local) {
+        await recordCheck(this.#options.dir, id, local.check);
+        state = { ...state, check: local.check, mismatches: local.mismatches };
+        await this.load();
+        this.#options.onRunners?.(this.#runners);
+      }
     } catch (err) {
       state = { ...state, running: false, error: (err as Error).message };
     } finally {
