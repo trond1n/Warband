@@ -25,7 +25,9 @@ import {
 import { eventLog } from './engine/log.ts';
 import { runTask } from './engine/run.ts';
 import { renderEvent, terminalGate } from './engine/terminal.ts';
-import { RUNNER_IDS, RUNNERS } from './runners/registry.ts';
+import { configDir, loadProviders, providersFile } from './core/providers.ts';
+import { createRunners, RUNNER_IDS } from './runners/registry.ts';
+import type { Runner } from './core/runner.ts';
 import { CLAUDE_MODEL_ALIASES, agentWizard, parseAgyModels } from './wizard/agent-wizard.ts';
 import type { Prompter } from './wizard/agent-wizard.ts';
 
@@ -47,34 +49,45 @@ The project is --dir, or the directory Warband was started from.
 Agents, skills and hooks live in <project>/.warband/.
 `;
 
+/**
+ * Runners with the binaries set in this machine's settings (the window's
+ * "Провайдеры" screen, or providers.json by hand).
+ */
+async function machineRunners(): Promise<Record<RunnerId, Runner>> {
+  return createRunners(await loadProviders(configDir()));
+}
+
 async function doctor(): Promise<number> {
+  const providers = await loadProviders(configDir());
+  const runners = createRunners(providers);
   const rows = await Promise.all(
     RUNNER_IDS.map(async (id) => {
-      const runner = RUNNERS[id];
+      const runner = runners[id];
       const detection = await runner.detect();
       return {
         CLI: runner.displayName,
-        binary: runner.binary,
+        binary: providers[id]?.binary ? `${runner.binary} (set)` : runner.binary,
         installed: detection.found ? 'yes' : 'no',
         version: detection.version ?? '',
         sandbox: runner.capabilities.sandbox,
         'headless approvals': runner.capabilities.headlessApprovals,
         verified: runner.capabilities.verified ? 'yes' : 'no',
-        note: detection.found ? (detection.problem ?? '') : 'not on PATH',
+        note: detection.found ? (detection.problem ?? '') : providers[id]?.binary ? 'cannot start the set binary' : 'not on PATH',
       };
     }),
   );
   console.table(rows);
+  console.log(`Binaries marked (set) come from ${providersFile(configDir())}.`);
   console.log('Login state is not checked here. Run `npm run spike` to test a real headless call.');
   return rows.some((row) => row.installed === 'yes') ? 0 : 1;
 }
 
 /** Asks the CLI itself which models it offers. No model call is made. */
-async function modelsOf(runner: RunnerId): Promise<string[]> {
+async function modelsOf(runners: Record<RunnerId, Runner>, runner: RunnerId): Promise<string[]> {
   if (runner === 'claude') return CLAUDE_MODEL_ALIASES;
   if (runner === 'antigravity') {
     const lines: string[] = [];
-    for await (const event of runProcess(RUNNERS.antigravity.binary, ['models'], { cwd: process.cwd(), timeoutMs: 30_000 })) {
+    for await (const event of runProcess(runners.antigravity.binary, ['models'], { cwd: process.cwd(), timeoutMs: 30_000 })) {
       if (event.type === 'stdout') lines.push(event.line);
     }
     return parseAgyModels(lines.join('\n'));
@@ -138,8 +151,9 @@ function terminalPrompter(): Prompter & { close(): void; handOver(run: () => Pro
 
 async function agentNew(root: string): Promise<number> {
   console.log('Looking for installed CLIs...');
-  const detected = await Promise.all(RUNNER_IDS.map(async (id) => ({ id, found: (await RUNNERS[id].detect()).found })));
-  const runners = detected.filter((d) => d.found).map((d) => ({ id: d.id, displayName: RUNNERS[d.id].displayName }));
+  const all = await machineRunners();
+  const detected = await Promise.all(RUNNER_IDS.map(async (id) => ({ id, found: (await all[id].detect()).found })));
+  const runners = detected.filter((d) => d.found).map((d) => ({ id: d.id, displayName: all[d.id].displayName }));
   const [agents, skills, hooks] = await Promise.all([listAgents(root), listSkills(root), loadHooks(root)]);
 
   const io = terminalPrompter();
@@ -147,7 +161,7 @@ async function agentNew(root: string): Promise<number> {
     const result = await agentWizard(io, {
       root,
       runners,
-      models: modelsOf,
+      models: (runner) => modelsOf(all, runner),
       existingAgents: agents.map((a) => a.name),
       skills,
       hooks,
@@ -260,7 +274,7 @@ async function run(root: string, agentName: string | undefined, taskWords: reado
     const result = await runTask(
       {
         root,
-        runners: RUNNERS,
+        runners: await machineRunners(),
         gate: terminalGate(io, reslop ? (worktree) => io.handOver(() => openInTerminal(reslop, worktree)) : undefined),
         report: (event) => {
           log.write(event);

@@ -60,6 +60,16 @@ export interface Detection {
   problem?: string;
 }
 
+/**
+ * Whether the CLI says it is logged in. Learned only by asking the CLI
+ * itself (ADR-0001); 'unknown' when it has no way to tell.
+ */
+export interface LoginState {
+  state: 'in' | 'out' | 'unknown';
+  /** How, as the CLI names it, e.g. "claude.ai". */
+  method?: string;
+}
+
 export interface Runner {
   readonly id: RunnerId;
   readonly displayName: string;
@@ -68,6 +78,8 @@ export interface Runner {
   /** Maps this CLI's JSON lines to common events. Absent until real logs exist. */
   readonly mapRaw?: RawMapper;
   detect(): Promise<Detection>;
+  /** Asks the CLI for its login state, for CLIs that report it. */
+  login?(): Promise<LoginState>;
   run(request: RunRequest): AsyncIterable<RunnerEvent>;
 }
 
@@ -85,6 +97,8 @@ export interface CliRunnerSpec {
    */
   promptOnStdin?: boolean;
   mapRaw?: RawMapper;
+  /** A command that makes the CLI report its own login state, and how to read its stdout. */
+  login?: { args: readonly string[]; parse(stdout: string): LoginState };
 }
 
 /** Turns one stdout line into an event without assuming a CLI-specific schema. */
@@ -102,6 +116,22 @@ export function parseLine(line: string): RunnerEvent | null {
     }
   }
   return { type: 'text', text: line };
+}
+
+async function askLogin(binary: string, login: NonNullable<CliRunnerSpec['login']>): Promise<LoginState> {
+  const lines: string[] = [];
+  let code: number | null = null;
+  for await (const event of runProcess(binary, login.args, { cwd: process.cwd(), timeoutMs: 15_000 })) {
+    if (event.type === 'stdout') lines.push(event.line);
+    if (event.type === 'spawn_error') return { state: 'unknown' };
+    if (event.type === 'exit') code = event.timedOut ? null : event.code;
+  }
+  if (code === null) return { state: 'unknown' };
+  try {
+    return login.parse(lines.join('\n'));
+  } catch {
+    return { state: 'unknown' };
+  }
 }
 
 /** A runner that launches an installed CLI as a child process. */
@@ -128,6 +158,8 @@ export function cliRunner(spec: CliRunnerSpec): Runner {
       }
       return output === '' ? { found: true } : { found: true, version: output };
     },
+
+    ...(spec.login ? { login: () => askLogin(spec.binary, spec.login as NonNullable<CliRunnerSpec['login']>) } : {}),
 
     async *run(request: RunRequest): AsyncGenerator<RunnerEvent> {
       const procOptions = {

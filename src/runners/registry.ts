@@ -1,5 +1,7 @@
-import { cliRunner } from '../core/runner.ts';
-import type { Runner, RunnerId, RunRequest } from '../core/runner.ts';
+import { configDir, loadProviders } from '../core/providers.ts';
+import type { Providers } from '../core/providers.ts';
+import { cliRunner, KNOWN_RUNNER_IDS } from '../core/runner.ts';
+import type { CliRunnerSpec, LoginState, Runner, RunnerId, RunRequest } from '../core/runner.ts';
 import { mapAntigravityEvent } from './events/antigravity.ts';
 import { mapClaudeEvent } from './events/claude.ts';
 
@@ -43,8 +45,21 @@ export function claudeArgs(request: RunRequest): string[] {
   ];
 }
 
-export const RUNNERS: Record<RunnerId, Runner> = {
-  claude: cliRunner({
+/**
+ * Reads `claude auth status --json` (2.1.325). Only the login flag and the
+ * method are kept; the account fields it also prints are dropped here.
+ */
+export function parseClaudeLogin(stdout: string): LoginState {
+  const data = JSON.parse(stdout) as { loggedIn?: unknown; authMethod?: unknown };
+  if (typeof data.loggedIn !== 'boolean') return { state: 'unknown' };
+  return {
+    state: data.loggedIn ? 'in' : 'out',
+    ...(data.loggedIn && typeof data.authMethod === 'string' ? { method: data.authMethod } : {}),
+  };
+}
+
+export const RUNNER_SPECS: Record<RunnerId, CliRunnerSpec> = {
+  claude: {
     id: 'claude',
     displayName: 'Claude Code',
     binary: 'claude',
@@ -54,6 +69,7 @@ export const RUNNERS: Record<RunnerId, Runner> = {
     // exceed the Windows command-line limit.
     promptOnStdin: true,
     buildArgs: claudeArgs,
+    login: { args: ['auth', 'status', '--json'], parse: parseClaudeLogin },
     capabilities: {
       transport: 'stream',
       structuredOutput: true,
@@ -62,9 +78,9 @@ export const RUNNERS: Record<RunnerId, Runner> = {
       // All fields checked on 2.1.325 with the args above, see docs/runners.md.
       verified: true,
     },
-  }),
+  },
 
-  codex: cliRunner({
+  codex: {
     id: 'codex',
     displayName: 'Codex',
     binary: 'codex',
@@ -77,9 +93,9 @@ export const RUNNERS: Record<RunnerId, Runner> = {
       headlessApprovals: 'unknown',
       verified: false,
     },
-  }),
+  },
 
-  antigravity: cliRunner({
+  antigravity: {
     id: 'antigravity',
     displayName: 'Antigravity',
     binary: 'agy',
@@ -102,9 +118,9 @@ export const RUNNERS: Record<RunnerId, Runner> = {
       headlessApprovals: 'unknown',
       verified: false,
     },
-  }),
+  },
 
-  kimi: cliRunner({
+  kimi: {
     id: 'kimi',
     displayName: 'Kimi Code',
     binary: 'kimi',
@@ -123,7 +139,24 @@ export const RUNNERS: Record<RunnerId, Runner> = {
       headlessApprovals: 'auto-run',
       verified: false,
     },
-  }),
+  },
 };
+
+/** The runners, with each binary taken from the machine settings when one is set there. */
+export function createRunners(providers: Providers = {}): Record<RunnerId, Runner> {
+  const entries = KNOWN_RUNNER_IDS.map((id) => {
+    const spec = RUNNER_SPECS[id];
+    return [id, cliRunner({ ...spec, binary: providers[id]?.binary ?? spec.binary })] as const;
+  });
+  return Object.fromEntries(entries) as Record<RunnerId, Runner>;
+}
+
+/** Runners as they come in the code, every binary looked up on PATH. */
+export const RUNNERS: Record<RunnerId, Runner> = createRunners();
+
+/** Runners as this machine is set up: providers.json in the config dir. */
+export async function configuredRunners(env: NodeJS.ProcessEnv = process.env): Promise<Record<RunnerId, Runner>> {
+  return createRunners(await loadProviders(configDir(env)));
+}
 
 export const RUNNER_IDS = Object.keys(RUNNERS) as RunnerId[];
