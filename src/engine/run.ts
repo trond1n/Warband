@@ -1,5 +1,6 @@
-import { cp, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { cp, mkdir, readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import { validateAgent } from '../core/agents.ts';
 import type { AgentDefinition } from '../core/agents.ts';
@@ -25,6 +26,7 @@ import {
   uncommitted,
   UNSTAGED_DIRS,
 } from './git.ts';
+import { worktreePath, worktreesHome } from './places.ts';
 import { findingLine, pendingPlans, planFeedback as plansFeedback, readPlans, renderPlan, writePlan } from './plan-file.ts';
 import type { Finding } from './plan-file.ts';
 import {
@@ -92,6 +94,8 @@ export interface EngineOptions {
   timeouts?: Partial<Record<'agent' | 'hook', number>>;
   /** Lets a runner whose adapter is unverified edit files. Off by default. */
   allowUnverified?: boolean;
+  /** The folder for run worktrees. Defaults to worktreesHome(); never inside the project. */
+  worktrees?: string;
   now?: () => Date;
   /** Stops the run: running agents and hooks are killed, and the run halts as cancelled. */
   signal?: AbortSignal;
@@ -210,14 +214,19 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   }
   const signal = options.signal;
 
-  // --- Worktree: the agents never touch the person's own checkout.
+  // --- Worktree: the agents never touch the person's own checkout, and the
+  // checkout is not an ancestor of their working directory (ADR-0003).
   // Two runs of one agent started within the same second get -2, -3...
+  const home = options.worktrees ?? worktreesHome();
   const stem = `${agent.name}-${stamp(now())}`;
   let runId = stem;
-  for (let n = 2; await branchExists(root, `warband/${runId}`); n++) runId = `${stem}-${n}`;
+  for (let n = 2; (await branchExists(root, `warband/${runId}`)) || existsSync(worktreePath(root, runId, home)); n++) {
+    runId = `${stem}-${n}`;
+  }
   const branch = `warband/${runId}`;
-  const worktree = join(warbandDir(options.root), 'worktrees', runId);
-  await excludeLocally(root, ['.warband/worktrees/', '.warband/runs/']);
+  const worktree = worktreePath(root, runId, home);
+  await mkdir(dirname(worktree), { recursive: true });
+  await excludeLocally(root, ['.warband/runs/']);
   await addWorktree(root, worktree, branch, base);
   report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base });
 

@@ -10,11 +10,15 @@ import type { Runner, RunnerId, RunRequest } from '../../../src/core/runner.ts';
 import { saveAgent, saveHooks } from '../../../src/core/workspace.ts';
 import { gitOk } from '../../../src/engine/git.ts';
 import type { TimedEvent } from '../shared/api.ts';
+import { worktreePath } from '../../../src/engine/places.ts';
 import { RunManager, summarize } from './runs.ts';
 
 /* The window's run manager against a real repository, with scripted agents. */
 
 const roots: string[] = [];
+const worktreeHome = await mkdtemp(join(tmpdir(), 'warband-wt-'));
+process.env['WARBAND_WORKTREES'] = worktreeHome;
+roots.push(worktreeHome);
 after(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true, maxRetries: 5 });
 });
@@ -161,7 +165,7 @@ test('plans in the worktree are listed while it exists, then from the run archiv
   const live = await manager.plans(root, started.runId);
   assert.equal(live.length, 1);
   assert.match(live[0]?.text ?? '', /- \[ \] Add a test/);
-  assert.ok(existsSync(join(root, '.warband', 'worktrees', started.runId)));
+  assert.ok(existsSync(worktreePath(root, started.runId, worktreeHome)), 'the worktree is outside the project while the run is open');
   manager.decide(started.runId, { outcome: 'ok' });
   await waitFor(seen, 'run_finished');
   const archived = await manager.plans(root, started.runId);

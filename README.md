@@ -43,16 +43,16 @@ Everything is saved as plain files in `<project>/.warband/`: `agents/<name>.json
 
 `warband run <agent> "<task>"` takes the task through every stage. The project must be a git repository with at least one commit.
 
-0. **setup**: the worktree is created under `.warband/worktrees/` from the last commit, and the agent's `setup` hooks run in it.
+0. **setup**: the worktree is created from the last commit in a per-user folder outside the project (`%LOCALAPPDATA%\Warband\wt` on Windows, see [ADR-0003](docs/adr/0003-worktrees-outside-the-project.md); `WARBAND_WORKTREES` overrides it), and the agent's `setup` hooks run in it.
 1. **clarify** and **plan**: the reviewer's model reads the code without changing it, may ask you questions, and writes a plan.
 2. **approve**: you accept the plan, ask for changes (it is re-planned), or reject it.
-3. **implement**: the implementer's model works in its own git worktree under `.warband/worktrees/`, on a new branch `warband/<run>`. It may edit files but cannot run commands.
+3. **implement**: the implementer's model works in that worktree, on a new branch `warband/<run>`. It may edit files but has no shell.
 4. **checks**: the agent's `checks` hooks run in the worktree. A failure goes back to implement, with the output.
 5. **review**: the reviewer's model reads the diff and approves or asks for changes, which go back to implement.
 6. **accept**: you see the summary, the changed files and the reviewer's comments. You accept, ask for changes, or reject.
 7. **finish**: the `finish` hooks run, then the work is committed on the run's branch. Nothing is merged into your branch: `git merge warband/<run>` when you want it.
 
-After 3 reworks the run stops. Your own checkout is never touched, and uncommitted changes in it are not part of the run. A stopped run with changes keeps its worktree so you can look at it. Every event goes to `.warband/runs/<run>/events.jsonl`, and both folders are kept out of `git status` through `.git/info/exclude`.
+After 3 reworks the run stops. Your own checkout is never touched, and uncommitted changes in it are not part of the run. A stopped run with changes keeps its worktree so you can look at it. Every event goes to `.warband/runs/<run>/events.jsonl`, which is kept out of `git status` through `.git/info/exclude`.
 
 Only adapters marked verified in `docs/runners.md` may implement. `--allow-unverified` overrides that.
 

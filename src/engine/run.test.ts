@@ -12,6 +12,7 @@ import type { Runner, RunnerId, RunRequest } from '../core/runner.ts';
 import { createSkill, saveHooks } from '../core/workspace.ts';
 import { git, gitOk } from './git.ts';
 import { eventLog } from './log.ts';
+import { isInside, worktreePath } from './places.ts';
 import { runTask, structuredAnswer } from './run.ts';
 import type { EngineEvent, GateDecision, HumanGate } from './run.ts';
 
@@ -21,6 +22,11 @@ import type { EngineEvent, GateDecision, HumanGate } from './run.ts';
  */
 
 const roots: string[] = [];
+// Run worktrees go to a temporary folder, never to the real per-user one.
+const worktreeHome = await mkdtemp(join(tmpdir(), 'warband-wt-'));
+process.env['WARBAND_WORKTREES'] = worktreeHome;
+roots.push(worktreeHome);
+const worktreeOf = (root: string, runId: string): string => worktreePath(root, runId, worktreeHome);
 after(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true, maxRetries: 5 });
 });
@@ -145,11 +151,11 @@ test('happy path: every stage runs once and the result is committed on its own b
   const files = await gitOk(root, ['show', '--name-only', '--format=%s', run.branch]);
   assert.deepEqual(files.filter(Boolean), ['test: Create out.txt saying fixed', 'out.txt']);
   assert.equal(existsSync(join(root, 'out.txt')), false, "the person's checkout is untouched");
-  assert.equal(existsSync(join(root, '.warband', 'worktrees', run.runId)), false, 'worktree removed after success');
+  assert.equal(existsSync(worktreeOf(root, run.runId)), false, 'worktree removed after success');
 
   const status = await gitOk(root, ['status', '--porcelain']);
   assert.deepEqual(status.filter((l) => !l.includes('.warband/')), []);
-  assert.ok(!status.some((l) => l.includes('worktrees') || l.includes('runs')), 'working files are excluded locally');
+  assert.ok(!status.some((l) => l.includes('runs')), 'the run log is excluded locally');
   assert.deepEqual(
     events.filter((e) => e.type === 'stage').map((e) => e.type === 'stage' && e.stage),
     ['clarify', 'plan', 'approve', 'implement', 'checks', 'review', 'accept', 'finish'],
@@ -241,6 +247,37 @@ test('line comments at acceptance become a plan, together with plans the person 
   assert.match(second, /`\.plan\/2000-01-01-01\.md`, `\.plan\/\d{4}-\d{2}-\d{2}-01\.md`/);
   assert.match(second, /# Changes asked for at acceptance\n\nTwo things\.\n\n## Improvements\n\n- \[ \] Say fixed!\n  - where: `out\.txt:1`/);
   assert.match(second, /- \[ \] Rename the file/);
+});
+
+test('the worktree is outside the project: the checkout is not one of its parents', async () => {
+  const root = await setup();
+  let cwd = '';
+  const { runners } = fakeRunners({
+    implement: async (req) => {
+      cwd = req.cwd;
+      await writeFile(join(req.cwd, 'out.txt'), 'fixed\n');
+      return [result('done')];
+    },
+  });
+  const events: EngineEvent[] = [];
+  const run = await go(root, runners, scriptedGate([], []), events);
+  assert.equal(run.state.status, 'done');
+  assert.equal(cwd, worktreeOf(root, run.runId));
+  assert.ok(!isInside(root, cwd), 'the agent works outside the project');
+  assert.ok(!isInside(cwd, root));
+  assert.ok(isInside(worktreeHome, cwd));
+  const started = events.find((e) => e.type === 'run_started');
+  assert.ok(started?.type === 'run_started' && started.worktree === cwd);
+});
+
+test('a worktree folder inside the project is refused before anything starts', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({});
+  await assert.rejects(
+    runTask({ root, runners, gate: scriptedGate([], []), report: () => {}, worktrees: join(root, 'wt'), reslop: false }, agent, 'x'),
+    /worktrees must be outside the project/,
+  );
+  assert.deepEqual(calls, []);
 });
 
 test('two runs started in the same second get their own branches', async () => {
@@ -369,7 +406,8 @@ test('an unverified adapter is not allowed to implement unless the person opts i
   const { runners, calls } = fakeRunners({}, false);
   await assert.rejects(go(root, runners, scriptedGate([], [])), /unverified adapter/);
   assert.equal(calls.length, 0, 'nothing ran');
-  assert.equal(existsSync(join(root, '.warband', 'worktrees')), false);
+  assert.equal(existsSync(join(worktreeHome, 'nothing-made-here')), false);
+  assert.deepEqual((await gitOk(root, ['worktree', 'list'])).length, 1, 'no worktree was added');
 });
 
 test('setup hooks run once in the new worktree before any agent', async () => {
@@ -404,7 +442,7 @@ test('a failing setup hook halts before any agent and leaves nothing behind', as
   assert.equal(run.state.status, 'halted');
   assert.match(run.state.haltReason ?? '', /setup hook "broken" failed/);
   assert.deepEqual(calls, []);
-  assert.equal(existsSync(join(root, '.warband', 'worktrees', run.runId)), false);
+  assert.equal(existsSync(worktreeOf(root, run.runId)), false);
   assert.deepEqual(await gitOk(root, ['branch', '--list', run.branch]), []);
 });
 
