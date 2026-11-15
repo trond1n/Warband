@@ -5,6 +5,8 @@ import { normalizeName } from './agents.ts';
 import type { AgentDefinition, Skill } from './agents.ts';
 import { HOOK_STAGES } from './hooks.ts';
 import type { Hook } from './hooks.ts';
+import { DEFAULT_PROTECTED, DEFAULT_TESTS } from './protected.ts';
+import type { ProtectedRules } from './protected.ts';
 import { KNOWN_RUNNER_IDS as RUNNER_IDS } from './runner.ts';
 
 /*
@@ -14,6 +16,7 @@ import { KNOWN_RUNNER_IDS as RUNNER_IDS } from './runner.ts';
  *   .warband/agents/<name>.json   agent definitions
  *   .warband/skills/<name>.md     skills: front matter (name, description) + rules
  *   .warband/hooks.json           { "hooks": [ { name, description, run, stage } ] }
+ *   .warband/protected.json       { "paths": [...], "tests": [...], "defaults": true }
  *
  * Nothing secret belongs here.
  */
@@ -130,6 +133,34 @@ export async function loadHooks(root: string): Promise<Hook[]> {
       ...(reduce === true ? { reduce: true } : {}),
     };
   });
+}
+
+const protectedFile = (root: string): string => join(warbandDir(root), 'protected.json');
+
+/** Protected paths for the project: the defaults plus .warband/protected.json. */
+export async function loadProtected(root: string): Promise<ProtectedRules> {
+  let data: unknown;
+  try {
+    data = await readJson(protectedFile(root));
+  } catch (err) {
+    if (isMissing(err)) return { paths: DEFAULT_PROTECTED, tests: DEFAULT_TESTS };
+    throw err;
+  }
+  const where = protectedFile(root);
+  if (!isObject(data)) throw new Error(`${where}: expected { "paths": [...], "tests": [...] }`);
+  const list = (key: string): string[] => {
+    const value = data[key];
+    if (value === undefined) return [];
+    if (!Array.isArray(value) || !value.every((v) => typeof v === 'string' && v.trim() !== '')) {
+      throw new Error(`${where}: "${key}" must be a list of glob patterns`);
+    }
+    return value;
+  };
+  const defaults = data['defaults'] !== false;
+  return {
+    paths: [...(defaults ? DEFAULT_PROTECTED : []), ...list('paths')],
+    tests: [...(defaults ? DEFAULT_TESTS : []), ...list('tests')],
+  };
 }
 
 export async function saveHooks(root: string, hooks: readonly Hook[]): Promise<void> {

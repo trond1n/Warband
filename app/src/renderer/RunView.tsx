@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 import type { PlanInfo, ProjectInfo, RunSummary, TimedEvent } from '../shared/api.ts';
 import { DiffReview } from './DiffReview.tsx';
 import { Markdown } from './Markdown.tsx';
-import { clock, duration, GATE_STAGES, openGate, ROLE_LABEL, STAGE_LABEL, STATUS_LABEL, timeline } from './model.ts';
+import { clock, duration, GATE_STAGES, openGate, protectedLine, ROLE_LABEL, STAGE_LABEL, STATUS_LABEL, timeline } from './model.ts';
 import type { OpenGate } from './model.ts';
 
 type Tab = 'timeline' | 'log' | 'checks' | 'plans';
@@ -265,6 +265,8 @@ function Log({ events }: { events: TimedEvent[] }): ReactNode {
         return [<div key={i} className={`log-line${e.result.ok ? '' : ' error'}`}>{at} {e.result.name}: {e.result.ok ? 'прошёл' : 'упал'}{e.result.reduced ? ' (отчёт reslop)' : ''}</div>];
       case 'review':
         return [<div key={i} className="log-line">{at} ревью: {e.verdict === 'approve' ? 'одобрено' : 'нужны правки'}, замечаний {e.findings.length}</div>];
+      case 'protected_changes':
+        return e.changes.length === 0 ? [] : [<div key={i} className="log-line warn">{at} защищённые файлы: {e.changes.map(protectedLine).join('; ')}</div>];
       case 'plan_written':
         return [<div key={i} className="log-line">{at} план .plan/{e.name}: {e.findings} пункт(ов) от {e.source === 'reviewer' ? 'ревьюера' : 'вас'}</div>];
       case 'gate':

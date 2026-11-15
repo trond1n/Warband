@@ -56,6 +56,30 @@ After 3 reworks the run stops. Your own checkout is never touched, and uncommitt
 
 Only adapters marked verified in `docs/runners.md` may implement. `--allow-unverified` overrides that.
 
+### Protected paths
+
+The implementer can edit the files that the hooks run: tests, linter config, the scripts in `package.json`, CI. After every implement Warband compares the changed files with a list of protected paths, without a model. Deleted or renamed test files count too. A match does not block the run. It is:
+
+- given to the reviewer as its own section of the prompt;
+- shown at acceptance as a separate warning, in the terminal and in the window;
+- written to `events.jsonl` as `protected_changes`.
+
+The defaults (`src/core/protected.ts`) cover:
+
+- Warband's own files: `.warband/`;
+- package manifests and lock files;
+- linter, formatter, TypeScript and test-runner configs;
+- Nx and Turbo files;
+- CI, git hooks, and agent settings (`.claude/`, `CLAUDE.md`, `AGENTS.md`).
+
+To add patterns, write `.warband/protected.json`:
+
+```json
+{ "paths": ["infra/**"], "tests": ["checks/**"], "defaults": true }
+```
+
+`"defaults": false` replaces the defaults instead of adding to them. Patterns follow `.gitignore` rules: a pattern without `/` matches at any depth, and a leading `/` anchors it to the root.
+
 ## The window
 
 ```sh

@@ -913,3 +913,19 @@ textarea {
 .wb-comment-glyph::before {
   background: var(--gate);
 }
+
+.protected {
+  background: var(--warn-soft);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 10px;
+}
+.protected ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.protected .link {
+  color: var(--text);
+  text-align: left;
+}

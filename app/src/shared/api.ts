@@ -8,8 +8,9 @@ import type { AgentDefinition } from '../../../src/core/agents.ts';
 import type { Hook } from '../../../src/core/hooks.ts';
 import type { EngineEvent, GateDecision } from '../../../src/engine/run.ts';
 import type { Finding } from '../../../src/engine/plan-file.ts';
+import type { ProtectedChange } from '../../../src/core/protected.ts';
 
-export type { AgentDefinition, EngineEvent, Finding, GateDecision, Hook };
+export type { AgentDefinition, EngineEvent, Finding, GateDecision, Hook, ProtectedChange };
 
 /** An engine event with the time it was reported. */
 export type TimedEvent = EngineEvent & { time: string };

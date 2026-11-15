@@ -14,7 +14,7 @@ import { git, gitOk } from './git.ts';
 import { eventLog } from './log.ts';
 import { isInside, worktreePath } from './places.ts';
 import { runTask, structuredAnswer } from './run.ts';
-import type { EngineEvent, GateDecision, HumanGate } from './run.ts';
+import type { AcceptRequest, EngineEvent, GateDecision, HumanGate } from './run.ts';
 
 /*
  * The engine against a real git repository and real hooks, with scripted
@@ -268,6 +268,57 @@ test('the worktree is outside the project: the checkout is not one of its parent
   assert.ok(isInside(worktreeHome, cwd));
   const started = events.find((e) => e.type === 'run_started');
   assert.ok(started?.type === 'run_started' && started.worktree === cwd);
+});
+
+test('changes to protected files and deleted tests are found after implement and shown to the reviewer and at acceptance', async () => {
+  const root = await setup();
+  await writeFile(join(root, 'package.json'), '{"scripts":{"test":"node --test"}}\n');
+  await writeFile(join(root, 'sum.test.js'), 'test\n');
+  await gitOk(root, ['add', '-A']);
+  await gitOk(root, ['commit', '--quiet', '-m', 'more']);
+  let accepted: AcceptRequest | undefined;
+  const { runners, calls } = fakeRunners({
+    implement: async (req) => {
+      await writeFile(join(req.cwd, 'out.txt'), 'fixed\n');
+      await writeFile(join(req.cwd, 'package.json'), '{"scripts":{"test":"exit 0"}}\n');
+      await rm(join(req.cwd, 'sum.test.js'));
+      return [result('done')];
+    },
+  });
+  const gate: HumanGate = {
+    answerQuestions: async () => '',
+    reviewPlan: async () => ({ outcome: 'ok' }),
+    acceptResult: async (req) => {
+      accepted = req;
+      return { outcome: 'ok' };
+    },
+  };
+  const events: EngineEvent[] = [];
+  const run = await go(root, runners, gate, events);
+  assert.equal(run.state.status, 'done', 'protected changes do not block the run');
+
+  const found = events.filter((e) => e.type === 'protected_changes');
+  assert.equal(found.length, 1);
+  assert.deepEqual(
+    found[0]?.type === 'protected_changes' && found[0].changes.map((c) => [c.path, c.reason]),
+    [
+      ['package.json', 'protected'],
+      ['sum.test.js', 'test_deleted'],
+    ],
+  );
+  const review = calls.find((c) => c.stage === 'review')?.req.prompt ?? '';
+  assert.match(review, /## Changes to protected files[\s\S]*- package\.json: modified \(protected by "package\.json"\)\n- sum\.test\.js: test file deleted/);
+  assert.deepEqual(accepted?.protectedChanges.map((c) => c.path), ['package.json', 'sum.test.js']);
+});
+
+test('without protected changes the reviewer prompt has no such section', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({});
+  const events: EngineEvent[] = [];
+  await go(root, runners, scriptedGate([], []), events);
+  assert.ok(!(calls.find((c) => c.stage === 'review')?.req.prompt ?? '').includes('Changes to protected files'));
+  const found = events.find((e) => e.type === 'protected_changes');
+  assert.ok(found?.type === 'protected_changes' && found.changes.length === 0, 'the empty result is still logged');
 });
 
 test('a worktree folder inside the project is refused before anything starts', async () => {

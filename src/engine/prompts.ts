@@ -3,6 +3,9 @@
  * Warband does not rely on a CLI's own memory or configuration.
  */
 
+import { describeProtected } from '../core/protected.ts';
+import type { ProtectedChange } from '../core/protected.ts';
+
 export interface PromptContext {
   /** What the agent does, from its definition. */
   instructions: string;
@@ -113,7 +116,10 @@ export const REVIEW_SCHEMA = {
 /** Above this the diff is cut, so the review prompt stays a reasonable size. */
 export const MAX_DIFF_CHARS = 200_000;
 
-export function reviewPrompt(ctx: PromptContext, change: { diff: string; summary: string }): string {
+export function reviewPrompt(
+  ctx: PromptContext,
+  change: { diff: string; summary: string; protectedChanges?: readonly ProtectedChange[] },
+): string {
   const diff =
     change.diff.length > MAX_DIFF_CHARS
       ? `${change.diff.slice(0, MAX_DIFF_CHARS)}\n... diff cut at ${MAX_DIFF_CHARS} characters; read the files for the rest`
@@ -124,6 +130,14 @@ export function reviewPrompt(ctx: PromptContext, change: { diff: string; summary
     common(ctx) +
     section('Approved plan', ctx.plan) +
     section("The implementer's summary", change.summary) +
+    section(
+      'Changes to protected files',
+      change.protectedChanges && change.protectedChanges.length > 0
+        ? 'Warband found these without a model. They change what the checks check (configs, scripts, CI, tests). ' +
+            'Decide whether each one is needed for the task; a change that weakens a check is a reason to request changes.\n\n' +
+            change.protectedChanges.map((c) => `- ${describeProtected(c)}`).join('\n')
+        : undefined,
+    ) +
     section('Checks that passed', ctx.checks.join('\n')) +
     section('The change', `\`\`\`diff\n${diff}\n\`\`\``) +
     'Do not try to run the tests or other commands: they will be denied, and the checks above have already run. ' +

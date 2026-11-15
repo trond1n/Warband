@@ -13,10 +13,13 @@ import type { Access, Runner, RunnerId } from '../core/runner.ts';
 import { advance, DEFAULT_ROUTE, initialState } from '../core/stages.ts';
 import type { Outcome, RouteOptions, RunState, Stage } from '../core/stages.ts';
 import { which } from '../core/which.ts';
-import { listSkills, loadHooks, warbandDir } from '../core/workspace.ts';
+import { protectedChanges as findProtected } from '../core/protected.ts';
+import type { ProtectedChange } from '../core/protected.ts';
+import { listSkills, loadHooks, loadProtected, warbandDir } from '../core/workspace.ts';
 import {
   addWorktree,
   branchExists,
+  changedFiles,
   commitAll,
   excludeLocally,
   headCommit,
@@ -56,6 +59,8 @@ export type EngineEvent =
   | { type: 'gate_open'; stage: 'accept'; result: AcceptRequest }
   | { type: 'gate'; stage: Stage; outcome: Outcome; comment?: string }
   | { type: 'review'; verdict: 'approve' | 'changes_requested'; findings: Finding[] }
+  /** After each implement: changed files that are protected, or tests deleted or renamed. Empty when there are none. */
+  | { type: 'protected_changes'; changes: ProtectedChange[] }
   /** A review plan in .plan/ of the worktree (reslop format), from the reviewer or the person. */
   | { type: 'plan_written'; stage: Stage; name: string; source: 'reviewer' | 'person'; findings: number }
   | { type: 'run_finished'; state: RunState; branch?: string; commit?: string; worktree?: string; archive?: string };
@@ -72,6 +77,8 @@ export interface AcceptRequest {
   diffStat: readonly string[];
   reviewComments: readonly string[];
   findings: readonly Finding[];
+  /** Protected files changed by the run, found without a model. */
+  protectedChanges: readonly ProtectedChange[];
   worktree: string;
   base: string;
   branch: string;
@@ -173,7 +180,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   const base = await headCommit(root);
   if (!base) throw new Error('the repository has no commits yet; commit something first');
 
-  const [skills, allHooks] = await Promise.all([listSkills(options.root), loadHooks(options.root)]);
+  const [skills, allHooks, protectedRules] = await Promise.all([listSkills(options.root), loadHooks(options.root), loadProtected(options.root)]);
   const problems = validateAgent(agent, { skills, hooks: allHooks });
   if (problems.length > 0) throw new Error(`agent /${agent.name} is not valid:\n  ${problems.join('\n  ')}`);
 
@@ -307,6 +314,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   let summary = '';
   let reviewComments: string[] = [];
   let reviewFindings: Finding[] = [];
+  let guarded: ProtectedChange[] = [];
   let commit: string | undefined;
 
   const handlers: Record<Stage, (state: RunState) => Promise<Outcome>> = {
@@ -346,6 +354,9 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
       const rework = state.reworks > 0 && feedback ? { attempt: state.reworks, feedback } : undefined;
       const result = await step('implement', 'implementer', implementPrompt(ctx, rework), 'edit');
       summary = result.text.trim();
+      // Deterministic: compare what changed with the protected paths, whatever the outcome.
+      guarded = findProtected(await changedFiles(worktree, base), protectedRules);
+      report({ type: 'protected_changes', changes: guarded });
       if (!result.ok) {
         feedback = `The previous attempt did not finish: ${result.errors.join('; ') || 'the agent reported a failure'}.`;
         return 'failed';
@@ -367,7 +378,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
         reviewComments = ['No files were changed.'];
         return 'changes_requested';
       }
-      const result = await step('review', 'reviewer', reviewPrompt(ctx, { diff: change.diff, summary }), 'read', REVIEW_SCHEMA as unknown as Record<string, unknown>);
+      const result = await step('review', 'reviewer', reviewPrompt(ctx, { diff: change.diff, summary, protectedChanges: guarded }), 'read', REVIEW_SCHEMA as unknown as Record<string, unknown>);
       if (!result.ok) return 'failed';
       const answer = record(structuredAnswer(result));
       const verdict = answer?.['verdict'];
@@ -387,7 +398,16 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
 
     async accept() {
       const change = await stagedDiff(worktree, base);
-      const request: AcceptRequest = { summary, diffStat: change.stat, reviewComments, findings: reviewFindings, worktree, base, branch };
+      const request: AcceptRequest = {
+        summary,
+        diffStat: change.stat,
+        reviewComments,
+        findings: reviewFindings,
+        protectedChanges: guarded,
+        worktree,
+        base,
+        branch,
+      };
       report({ type: 'gate_open', stage: 'accept', result: request });
       const decision = await gate.acceptResult(request);
       report({ type: 'gate', stage: 'accept', outcome: decision.outcome, ...(decision.comment ? { comment: decision.comment } : {}) });
