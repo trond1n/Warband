@@ -1,0 +1,433 @@
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { after, test } from 'node:test';
+
+import type { AgentDefinition } from '../core/agents.ts';
+import type { AgentEvent } from '../core/events.ts';
+import type { Hook } from '../core/hooks.ts';
+import type { Runner, RunnerId, RunRequest } from '../core/runner.ts';
+import { createSkill, saveHooks } from '../core/workspace.ts';
+import { git, gitOk } from './git.ts';
+import { eventLog } from './log.ts';
+import { runTask, structuredAnswer } from './run.ts';
+import type { EngineEvent, GateDecision, HumanGate } from './run.ts';
+
+/*
+ * The engine against a real git repository and real hooks, with scripted
+ * agents in place of model calls.
+ */
+
+const roots: string[] = [];
+after(async () => {
+  for (const root of roots) await rm(root, { recursive: true, force: true, maxRetries: 5 });
+});
+
+async function repo(): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'warband-run-'));
+  roots.push(root);
+  await gitOk(root, ['init', '--quiet']);
+  await gitOk(root, ['config', 'user.email', 'test@example.invalid']);
+  await gitOk(root, ['config', 'user.name', 'Warband Test']);
+  await writeFile(join(root, 'README.md'), '# demo\n');
+  await gitOk(root, ['add', '-A']);
+  await gitOk(root, ['commit', '--quiet', '-m', 'init']);
+  return root;
+}
+
+type Stage = 'clarify' | 'plan' | 'implement' | 'review';
+
+/** Which stage a request belongs to, from what the engine asks for. */
+const stageOf = (req: RunRequest): Stage => {
+  const props = (req.jsonSchema?.['properties'] ?? {}) as Record<string, unknown>;
+  if ('status' in props) return 'clarify';
+  if ('verdict' in props) return 'review';
+  return req.access === 'edit' ? 'implement' : 'plan';
+};
+
+type Script = Partial<Record<Stage, (req: RunRequest, call: number) => AgentEvent[] | Promise<AgentEvent[]>>>;
+
+const result = (text: string, structured?: unknown): AgentEvent => ({
+  kind: 'result',
+  ok: true,
+  text,
+  deniedTools: [],
+  ...(structured === undefined ? {} : { structured }),
+});
+
+const DEFAULTS: Required<Script> = {
+  clarify: () => [result('', { status: 'clear', questions: [] })],
+  plan: () => [result('1. Create out.txt with the word fixed.')],
+  implement: async (req) => {
+    await writeFile(join(req.cwd, 'out.txt'), 'fixed\n');
+    return [{ kind: 'tool_call', name: 'Write', input: {} }, result('Created out.txt.')];
+  },
+  review: () => [result('', { verdict: 'approve', findings: [] })],
+};
+
+function fakeRunners(script: Script, verified = true): { runners: Record<RunnerId, Runner>; calls: { stage: Stage; req: RunRequest }[] } {
+  const calls: { stage: Stage; req: RunRequest }[] = [];
+  const counts: Record<Stage, number> = { clarify: 0, plan: 0, implement: 0, review: 0 };
+  const make = (id: RunnerId): Runner => ({
+    id,
+    displayName: `fake ${id}`,
+    binary: id,
+    capabilities: { transport: 'stream', structuredOutput: true, sandbox: 'agent', headlessApprovals: 'deny', verified },
+    mapRaw: (data) => [data as unknown as AgentEvent],
+    async detect() {
+      return { found: true };
+    },
+    async *run(req) {
+      const stage = stageOf(req);
+      calls.push({ stage, req });
+      const events = await (script[stage] ?? DEFAULTS[stage])(req, counts[stage]++);
+      for (const event of events) yield { type: 'raw', data: event as unknown as Record<string, unknown> };
+      yield { type: 'done', exitCode: 0, timedOut: false };
+    },
+  });
+  return { runners: { claude: make('claude'), codex: make('codex'), antigravity: make('antigravity'), kimi: make('kimi') }, calls };
+}
+
+function scriptedGate(plan: GateDecision[], accept: GateDecision[], answers = ''): HumanGate & { asked: string[][] } {
+  const asked: string[][] = [];
+  return {
+    asked,
+    answerQuestions: async (questions) => {
+      asked.push([...questions]);
+      return answers;
+    },
+    reviewPlan: async () => plan.shift() ?? { outcome: 'ok' },
+    acceptResult: async () => accept.shift() ?? { outcome: 'ok' },
+  };
+}
+
+const agent: AgentDefinition = {
+  name: 'test',
+  description: 'Write the file the task asks for.',
+  skills: ['canon'],
+  hooks: ['content'],
+  roles: { implementer: { runner: 'claude', model: 'sonnet' }, reviewer: { runner: 'claude', model: 'opus' } },
+};
+
+const node = (script: string): string => `"${process.execPath}" -e "${script}"`;
+const contentHook: Hook = {
+  name: 'content',
+  description: '',
+  run: node("process.exit(require('fs').readFileSync('out.txt','utf8').includes('fixed')?0:1)"),
+  stage: 'checks',
+};
+
+async function setup(hooks: Hook[] = [contentHook]): Promise<string> {
+  const root = await repo();
+  await createSkill(root, 'canon', 'House rules');
+  await saveHooks(root, hooks);
+  return root;
+}
+
+const go = (root: string, runners: Record<RunnerId, Runner>, gate: HumanGate, events: EngineEvent[] = []) =>
+  runTask({ root, runners, gate, report: (e) => events.push(e), timeouts: { hook: 30_000 } }, agent, 'Create out.txt saying fixed');
+
+test('happy path: every stage runs once and the result is committed on its own branch', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({});
+  const events: EngineEvent[] = [];
+  const run = await go(root, runners, scriptedGate([], []), events);
+
+  assert.equal(run.state.status, 'done');
+  assert.deepEqual(calls.map((c) => c.stage), ['clarify', 'plan', 'implement', 'review']);
+  assert.deepEqual(calls.map((c) => c.req.model), ['opus', 'opus', 'sonnet', 'opus'], 'planner uses the reviewer model');
+  assert.deepEqual(calls.map((c) => c.req.access), ['read', 'read', 'edit', 'read']);
+  assert.match(calls[2]?.req.prompt ?? '', /## Rules you must follow\n\n### canon/);
+  assert.match(calls[3]?.req.prompt ?? '', /\+fixed/, 'the reviewer sees the diff');
+
+  const files = await gitOk(root, ['show', '--name-only', '--format=%s', run.branch]);
+  assert.deepEqual(files.filter(Boolean), ['test: Create out.txt saying fixed', 'out.txt']);
+  assert.equal(existsSync(join(root, 'out.txt')), false, "the person's checkout is untouched");
+  assert.equal(existsSync(join(root, '.warband', 'worktrees', run.runId)), false, 'worktree removed after success');
+
+  const status = await gitOk(root, ['status', '--porcelain']);
+  assert.deepEqual(status.filter((l) => !l.includes('.warband/')), []);
+  assert.ok(!status.some((l) => l.includes('worktrees') || l.includes('runs')), 'working files are excluded locally');
+  assert.deepEqual(
+    events.filter((e) => e.type === 'stage').map((e) => e.type === 'stage' && e.stage),
+    ['clarify', 'plan', 'approve', 'implement', 'checks', 'review', 'accept', 'finish'],
+  );
+});
+
+test('a failing check sends the work back with the check output in the next prompt', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({
+    implement: async (req, call) => {
+      await writeFile(join(req.cwd, 'out.txt'), call === 0 ? 'broken\n' : 'fixed\n');
+      return [result('done')];
+    },
+  });
+  const run = await go(root, runners, scriptedGate([], []));
+  assert.equal(run.state.status, 'done');
+  assert.equal(run.state.reworks, 1);
+  const attempts = calls.filter((c) => c.stage === 'implement');
+  assert.equal(attempts.length, 2);
+  assert.match(attempts[1]?.req.prompt ?? '', /attempt 2[\s\S]*Check "content" failed \(exit 1\)/);
+});
+
+const finding = {
+  severity: 'high',
+  where: 'out.txt:1',
+  problem: 'No trailing newline check.',
+  expected: 'The file ends with a newline.',
+  check: ['out.txt ends with a newline'],
+};
+
+test('reviewer findings become a reslop plan in .plan/, which goes back to the implementer and is not committed', async () => {
+  const root = await setup();
+  let planSeen = '';
+  const { runners, calls } = fakeRunners({
+    implement: async (req, call) => {
+      await writeFile(join(req.cwd, 'out.txt'), 'fixed\n');
+      if (call === 1) {
+        // The implementer ticks the plan off, as reslop's agent instructions ask.
+        const [name] = (await readdir(join(req.cwd, '.plan'))).sort();
+        const file = join(req.cwd, '.plan', name ?? '');
+        planSeen = await readFile(file, 'utf8');
+        await writeFile(file, planSeen.replace('status: editing', 'status: done').replaceAll('[ ]', '[x]'));
+      }
+      return [result('done')];
+    },
+    review: (_req, call) => [
+      result('', call === 0 ? { verdict: 'changes_requested', findings: [finding] } : { verdict: 'approve', findings: [] }),
+    ],
+  });
+  const events: EngineEvent[] = [];
+  const run = await go(root, runners, scriptedGate([], []), events);
+  assert.equal(run.state.status, 'done');
+
+  assert.match(
+    planSeen,
+    /^---\nstatus: editing\n---\n\n# Review of attempt 1\n\n## Improvements\n\n- \[ \] high: No trailing newline check\.\n  - where: `out\.txt:1`\n/,
+  );
+  assert.match(planSeen, /  - check:\n    - \[ \] out\.txt ends with a newline\n/);
+  const second = calls.filter((c) => c.stage === 'implement')[1];
+  assert.match(second?.req.prompt ?? '', /Work through the unchecked items in `\.plan\/\d{4}-\d{2}-\d{2}-01\.md`/);
+  assert.match(second?.req.prompt ?? '', /- \[ \] high: No trailing newline check\./);
+
+  const files = await gitOk(root, ['show', '--name-only', '--format=', run.branch]);
+  assert.deepEqual(files.filter(Boolean), ['out.txt'], '.plan/ is not committed');
+  const finished = events.find((e) => e.type === 'run_finished');
+  assert.ok(finished?.type === 'run_finished' && finished.archive);
+  const archived = await readdir(join(finished.archive, 'plan'));
+  assert.equal(archived.length, 1, 'the plan is archived with the run');
+  assert.ok(events.some((e) => e.type === 'plan_written' && e.source === 'reviewer' && e.findings === 1));
+});
+
+test('line comments at acceptance become a plan, together with plans the person left in .plan/', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({});
+  const gate: HumanGate = {
+    answerQuestions: async () => '',
+    reviewPlan: async () => ({ outcome: 'ok' }),
+    acceptResult: async (req) => {
+      if (calls.filter((c) => c.stage === 'implement').length > 1) return { outcome: 'ok' };
+      // As if written in reslop.
+      await mkdir(join(req.worktree, '.plan'), { recursive: true });
+      await writeFile(join(req.worktree, '.plan', '2000-01-01-01.md'), '---\nstatus: editing\n---\n\n# Mine\n\n- [ ] Rename the file\n');
+      return { outcome: 'changes_requested', comment: 'Two things.', findings: [{ where: 'out.txt:1', problem: 'Say fixed!' }] };
+    },
+  };
+  const run = await go(root, runners, gate);
+  assert.equal(run.state.status, 'done');
+  const second = calls.filter((c) => c.stage === 'implement')[1]?.req.prompt ?? '';
+  assert.match(second, /`\.plan\/2000-01-01-01\.md`, `\.plan\/\d{4}-\d{2}-\d{2}-01\.md`/);
+  assert.match(second, /# Changes asked for at acceptance\n\nTwo things\.\n\n## Improvements\n\n- \[ \] Say fixed!\n  - where: `out\.txt:1`/);
+  assert.match(second, /- \[ \] Rename the file/);
+});
+
+test('two runs started in the same second get their own branches', async () => {
+  const root = await setup();
+  const fixed = new Date(2026, 10, 15, 12, 0, 0);
+  const once = async () => {
+    const { runners } = fakeRunners({});
+    return runTask({ root, runners, gate: scriptedGate([], []), report: () => {}, timeouts: { hook: 30_000 }, now: () => fixed, reslop: false }, agent, 'x');
+  };
+  const first = await once();
+  const second = await once();
+  assert.equal(first.branch, 'warband/test-20261115-120000');
+  assert.equal(second.branch, 'warband/test-20261115-120000-2');
+  assert.equal(second.state.status, 'done');
+});
+
+test('cancelling stops the run before the next stage', async () => {
+  const root = await setup();
+  const controller = new AbortController();
+  const { runners, calls } = fakeRunners({
+    plan: () => {
+      controller.abort();
+      return [result('1. Plan.')];
+    },
+  });
+  const run = await runTask(
+    { root, runners, gate: scriptedGate([], []), report: () => {}, timeouts: { hook: 30_000 }, signal: controller.signal, reslop: false },
+    agent,
+    'Create out.txt saying fixed',
+  );
+  assert.equal(run.state.status, 'halted');
+  assert.equal(run.state.haltReason, 'cancelled');
+  assert.deepEqual(calls.map((c) => c.stage), ['clarify', 'plan']);
+});
+
+test('a hook marked reduce runs through reslop when it is there, and warns when it is not', async () => {
+  const root = await setup([{ ...contentHook, reduce: true }]);
+  // A stand-in for `reslop t -- <command>`: prints a marker, then runs the command.
+  const bin = join(root, 'fake-bin');
+  await mkdir(bin);
+  const shim = join(bin, 'shim.mjs');
+  await writeFile(
+    shim,
+    "import { spawnSync } from 'node:child_process';\n" +
+      "console.log('REDUCED ' + process.argv.slice(2, 4).join(' '));\n" +
+      "const r = spawnSync(process.argv[4], process.argv.slice(5), { stdio: 'inherit' });\n" +
+      'process.exit(r.status ?? 1);\n',
+  );
+  const isWin = process.platform === 'win32';
+  const reslop = join(bin, isWin ? 'reslop.cmd' : 'reslop');
+  await writeFile(
+    reslop,
+    isWin ? `@"${process.execPath}" "${shim}" %*\r\n` : `#!/bin/sh\nexec "${process.execPath}" "${shim}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  const oldPath = process.env['PATH'];
+  process.env['PATH'] = `${bin}${isWin ? ';' : ':'}${oldPath ?? ''}`;
+  try {
+    const { runners } = fakeRunners({});
+    const events: EngineEvent[] = [];
+    const run = await runTask(
+      { root, runners, gate: scriptedGate([], []), report: (e) => events.push(e), timeouts: { hook: 30_000 }, reslop },
+      { ...agent },
+      'x',
+    );
+    assert.equal(run.state.status, 'done');
+    const hook = events.find((e) => e.type === 'hook');
+    assert.ok(hook?.type === 'hook' && hook.result.reduced);
+    assert.equal(hook.result.output[0], 'REDUCED t --');
+  } finally {
+    process.env['PATH'] = oldPath;
+  }
+  const { runners } = fakeRunners({});
+  const events: EngineEvent[] = [];
+  await runTask({ root, runners, gate: scriptedGate([], []), report: (e) => events.push(e), timeouts: { hook: 30_000 }, reslop: false }, agent, 'x');
+  assert.ok(events.some((e) => e.type === 'warning' && /reslop is not installed/.test(e.message)));
+});
+
+test('questions from the planner go to the person, and the answers reach the plan', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({
+    clarify: () => [result('', { status: 'questions', questions: ['Which directory?'] })],
+  });
+  const gate = scriptedGate([], [], 'The repository root.');
+  await go(root, runners, gate);
+  assert.deepEqual(gate.asked, [['Which directory?']]);
+  assert.match(calls.find((c) => c.stage === 'plan')?.req.prompt ?? '', /1\. Which directory\?\n\nAnswers:\nThe repository root\./);
+});
+
+test('plan feedback re-plans; rejecting the result halts and keeps the work for inspection', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({});
+  const run = await go(
+    root,
+    runners,
+    scriptedGate([{ outcome: 'changes_requested', comment: 'Mention tests.' }], [{ outcome: 'rejected' }]),
+  );
+  assert.equal(run.state.status, 'halted');
+  assert.match(run.state.haltReason ?? '', /rejected by human/);
+  const plans = calls.filter((c) => c.stage === 'plan');
+  assert.equal(plans.length, 2);
+  assert.match(plans[1]?.req.prompt ?? '', /## What the person wants changed in it\n\nMention tests\./);
+  assert.ok(run.worktree && existsSync(join(run.worktree, 'out.txt')), 'worktree kept with the change');
+});
+
+test('rejecting the plan halts and leaves no worktree or branch behind', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({});
+  const run = await go(root, runners, scriptedGate([{ outcome: 'rejected' }], []));
+  assert.equal(run.state.status, 'halted');
+  assert.equal(calls.some((c) => c.stage === 'implement'), false);
+  assert.equal(run.worktree, undefined);
+  assert.notEqual((await git(root, ['rev-parse', '--verify', run.branch])).code, 0, 'branch deleted');
+});
+
+test('an agent that fails at planning halts the run', async () => {
+  const root = await setup();
+  const { runners } = fakeRunners({ plan: () => [{ kind: 'error', message: 'quota exceeded' }] });
+  const run = await go(root, runners, scriptedGate([], []));
+  assert.equal(run.state.status, 'halted');
+  assert.equal(run.state.haltReason, 'plan failed');
+});
+
+test('an unverified adapter is not allowed to implement unless the person opts in', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({}, false);
+  await assert.rejects(go(root, runners, scriptedGate([], [])), /unverified adapter/);
+  assert.equal(calls.length, 0, 'nothing ran');
+  assert.equal(existsSync(join(root, '.warband', 'worktrees')), false);
+});
+
+test('setup hooks run once in the new worktree before any agent', async () => {
+  const prepare: Hook = { name: 'prepare', description: '', run: node("require('fs').writeFileSync('ready.txt','')"), stage: 'setup' };
+  const root = await setup([contentHook, prepare]);
+  let sawReady = false;
+  const { runners } = fakeRunners({
+    clarify: async (req) => {
+      sawReady = existsSync(join(req.cwd, 'ready.txt'));
+      return [result('{"status":"clear","questions":[]}', { status: 'clear', questions: [] })];
+    },
+  });
+  const events: EngineEvent[] = [];
+  const withSetup = { ...agent, hooks: ['prepare', 'content'] };
+  const run = await runTask({ root, runners, gate: scriptedGate([], []), report: (e) => events.push(e), timeouts: { hook: 30_000 } }, withSetup, 'Create out.txt saying fixed');
+
+  assert.equal(run.state.status, 'done');
+  assert.ok(sawReady, 'the planner sees what setup made');
+  assert.deepEqual(events.filter((e) => e.type === 'hook_started').map((e) => e.type === 'hook_started' && e.name), ['prepare', 'content']);
+});
+
+test('a failing setup hook halts before any agent and leaves nothing behind', async () => {
+  const broken: Hook = { name: 'broken', description: '', run: node('process.exit(3)'), stage: 'setup' };
+  const root = await setup([contentHook, broken]);
+  const { runners, calls } = fakeRunners({});
+  const run = await runTask(
+    { root, runners, gate: scriptedGate([], []), report: () => {}, timeouts: { hook: 30_000 } },
+    { ...agent, hooks: ['broken', 'content'] },
+    'Create out.txt saying fixed',
+  );
+
+  assert.equal(run.state.status, 'halted');
+  assert.match(run.state.haltReason ?? '', /setup hook "broken" failed/);
+  assert.deepEqual(calls, []);
+  assert.equal(existsSync(join(root, '.warband', 'worktrees', run.runId)), false);
+  assert.deepEqual(await gitOk(root, ['branch', '--list', run.branch]), []);
+});
+
+test('a repository without commits is refused before any agent runs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'warband-empty-'));
+  roots.push(root);
+  await gitOk(root, ['init', '--quiet']);
+  const { runners } = fakeRunners({});
+  await assert.rejects(go(root, runners, scriptedGate([], [])), /no commits yet/);
+});
+
+test('the event log records the run under its id', async () => {
+  const root = await setup();
+  const { runners } = fakeRunners({});
+  const log = eventLog(root);
+  await runTask({ root, runners, gate: scriptedGate([], []), report: log.write, timeouts: { hook: 30_000 } }, agent, 'Create out.txt saying fixed');
+  const lines = (await readFile(log.path() ?? '', 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as { type: string });
+  assert.equal(lines[0]?.type, 'run_started');
+  assert.equal(lines.at(-1)?.type, 'run_finished');
+});
+
+test('structured answers fall back to JSON in the final text', () => {
+  const base = { ok: true, deniedTools: [], errors: [] };
+  assert.deepEqual(structuredAnswer({ ...base, text: '```json\n{"verdict":"approve"}\n```' }), { verdict: 'approve' });
+  assert.equal(structuredAnswer({ ...base, text: 'not json' }), undefined);
+});

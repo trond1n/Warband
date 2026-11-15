@@ -77,6 +77,40 @@ test('a CLI that waits on stdin does not hang, because stdin is closed', async (
   ]);
 });
 
+/*
+ * On POSIX the orphan inherits the stdout pipe, so 'close' never comes and
+ * the exit grace period is what ends the run. On Windows the pipe is not
+ * held by the orphan and this passes without reaching that path; the
+ * Windows hang (a shell's child surviving a kill) is covered in hooks.test.ts.
+ */
+test('a CLI that exits but leaves a process holding stdout does not hang the run', async () => {
+  const started = Date.now();
+  const events = await collect(
+    fakeCli(`
+      const { spawn } = require('node:child_process');
+      const orphan = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'inherit' });
+      orphan.unref();
+      console.log(String(orphan.pid));
+    `),
+    20_000,
+  );
+  const orphanPid = events.find((event) => event.type === 'raw' || event.type === 'text');
+  try {
+    assert.deepEqual(events.at(-1), { type: 'done', exitCode: 0, timedOut: false });
+    assert.ok(Date.now() - started < 10_000, 'finished soon after the child exited');
+  } finally {
+    // The orphan outlives the run by design of this test; clean it up.
+    const pid = orphanPid?.type === 'raw' ? NaN : Number(orphanPid?.text);
+    if (Number.isInteger(pid)) {
+      try {
+        process.kill(pid);
+      } catch {
+        // already gone
+      }
+    }
+  }
+});
+
 test('a missing binary becomes an error event and a failed detection', async () => {
   const spec = fakeCli('', 'warband-no-such-binary');
   const events = await collect(spec);

@@ -14,7 +14,7 @@ export type Roles = Record<Role, RoleAssignment>;
  * The one rule Warband insists on: whoever writes the code does not get to
  * accept it. The reviewer must differ from the implementer by CLI or by model.
  */
-export function validateRoles(roles: Roles): string[] {
+export function validateRoles(roles: Pick<Roles, 'implementer' | 'reviewer'>): string[] {
   const problems: string[] = [];
   const { implementer, reviewer } = roles;
 

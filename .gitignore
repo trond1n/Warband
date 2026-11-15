@@ -1,0 +1,4 @@
+node_modules/
+spike-output/
+app/out/
+.log/
