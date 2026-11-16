@@ -34,7 +34,14 @@ const median = (values: readonly number[]): number => {
   return sorted.length % 2 === 1 ? (sorted[mid] ?? 0) : ((sorted[mid - 1] ?? 0) + (sorted[mid] ?? 0)) / 2;
 };
 
-const verdictWord = (v: { verdict: string; findings: number }): string => `${v.verdict === 'approve' ? 'approve' : 'changes'}${v.findings > 0 ? `(${v.findings})` : ''}`;
+/** "approve", "changes(2)", or with severities "approve(low 1)", "changes(high 1, medium 2)". */
+const verdictWord = (v: RunRecord['metrics']['reviews'][number]): string => {
+  const word = v.verdict === 'approve' ? 'approve' : 'changes';
+  if (v.findings === 0) return word;
+  if (!v.severity) return `${word}(${v.findings})`;
+  const parts = (['high', 'medium', 'low'] as const).filter((k) => (v.severity?.[k] ?? 0) > 0).map((k) => `${k} ${v.severity?.[k]}`);
+  return `${word}(${parts.join(', ')})`;
+};
 
 export function summarize(report: BenchReport): TaskSummary[] {
   const byKey = new Map<string, RunRecord[]>();
@@ -110,6 +117,7 @@ export function renderReport(report: BenchReport): string[] {
   for (const s of summaries) {
     for (const miss of s.misses) lines.push(`  ${s.key}: ${miss}`);
   }
+  for (const run of report.runs) if (run.note) lines.push(`  ${run.key}: note: ${run.note}`);
   return lines;
 }
 

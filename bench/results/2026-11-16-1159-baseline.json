@@ -33,15 +33,14 @@
       "task": "review-clean",
       "attempt": 1,
       "verify": {
-        "ok": false,
-        "code": 1,
-        "output": "FAIL: approved, with findings on a clean change:\nOptional note: in pageBounds, the local `last` was split into `end` (exclusive) and the expression `end - 1`. The doc comment still describes the result as [first, last], but no local is named `last` any more, so the link between the comment and the code is a little weaker. Behaviour is the same: Math.min(first + perPage, total) - 1 is computed exactly as before. lib/pager.js:40 Optional: either keep the name `last` (`const last = end - 1; return [first, last];`) or leave the code as it is. No behaviour change is needed. node test/pager.test.js still passes pageBounds(3, 45, 20) still returns [40, 44] and pageBounds(1, 0, 20) still returns [0, -1]"
+        "ok": true,
+        "code": 0,
+        "output": "PASS: approved; 1 low finding(s) only"
       },
       "expected": {
         "verify": "pass",
         "ok": false,
         "misses": [
-          "verify: expected pass, got fail",
           "review findings: expected at most 0, got 1"
         ]
       },
@@ -67,7 +66,12 @@
         "reviews": [
           {
             "verdict": "approve",
-            "findings": 1
+            "findings": 1,
+            "severity": {
+              "high": 0,
+              "medium": 0,
+              "low": 1
+            }
           }
         ],
         "checks": [
@@ -93,7 +97,8 @@
           }
         }
       },
-      "events": "review-clean-1.jsonl"
+      "events": "review-clean-1.jsonl",
+      "note": "verify and metrics recomputed from this run's saved events.jsonl after the review-clean criterion changed (low findings no longer fail it); no agent was run again"
     }
   ]
 }

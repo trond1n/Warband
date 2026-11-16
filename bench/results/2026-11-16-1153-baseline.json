@@ -111,7 +111,8 @@
         },
         "haltReason": "rework limit of 0 reached at review"
       },
-      "events": "review-clean-1.jsonl"
+      "events": "review-clean-1.jsonl",
+      "note": "ran the first version of the task, whose change was not clean (it threw for NaN); the reviewer was right to ask for changes. Not recomputed: the change it judged no longer exists"
     },
     {
       "key": "review-bug",

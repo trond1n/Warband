@@ -62,6 +62,8 @@ export interface RunRecord {
   metrics: RunMetrics;
   /** The run's events.jsonl, relative to the report. */
   events?: string;
+  /** Set by hand when a record was changed after the run, saying what and why. */
+  note?: string;
 }
 
 export interface BenchReport {

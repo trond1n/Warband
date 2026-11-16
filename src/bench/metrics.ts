@@ -22,11 +22,24 @@ export interface RunMetrics {
   deniedTools: string[];
   /** Protected paths changed, from every protected_changes event. */
   protectedPaths: string[];
-  /** The reviewer's verdicts in order, with the number of findings each. */
-  reviews: { verdict: 'approve' | 'changes_requested'; findings: number }[];
+  /** The reviewer's verdicts in order, with the number of findings each, also by severity. */
+  reviews: { verdict: 'approve' | 'changes_requested'; findings: number; severity?: Severities }[];
   checks: { name: string; ok: boolean }[];
   skills: { name: string; sha256: string }[];
   roles: Partial<Record<Role, RoleInfo>>;
+}
+
+/** Findings by severity; a finding without one counts as medium. Absent in reports made before it was recorded. */
+export interface Severities {
+  high: number;
+  medium: number;
+  low: number;
+}
+
+export function severities(findings: readonly { severity?: string }[]): Severities {
+  const out: Severities = { high: 0, medium: 0, low: 0 };
+  for (const f of findings) out[f.severity === 'high' || f.severity === 'low' ? f.severity : 'medium']++;
+  return out;
 }
 
 export function parseEvents(text: string): TimedEvent[] {
@@ -85,7 +98,7 @@ export function runMetrics(events: readonly TimedEvent[]): RunMetrics {
         for (const c of e.changes) if (!m.protectedPaths.includes(c.path)) m.protectedPaths.push(c.path);
         break;
       case 'review':
-        m.reviews.push({ verdict: e.verdict, findings: e.findings.length });
+        m.reviews.push({ verdict: e.verdict, findings: e.findings.length, severity: severities(e.findings) });
         break;
       case 'run_finished':
         closeStage(at(e));

@@ -20,6 +20,10 @@ test = "node test/pager.test.js"
 planner = true
 implementer = ["change"]
 
+# verify passes on approve with no finding above low (a finding without a
+# severity counts as medium). Any finding at all is shown as the unmet
+# expectation review_findings_max = 0, next to the result, as reworks are
+# in cascade-bugs.
 [expect]
 status = "done"
 verify = "pass"
