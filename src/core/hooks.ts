@@ -1,5 +1,9 @@
 import { NAME_PATTERN } from './names.ts';
 import { evaluate } from './policy.ts';
+import { join } from 'node:path';
+
+import { keepLogsClean } from './reslop-logs.ts';
+import type { LogCleanup } from './reslop-logs.ts';
 import { runProcess } from './proc.ts';
 
 /**
@@ -40,6 +44,8 @@ export interface HookResult {
   reduced: boolean;
   /** Last lines of combined stdout and stderr. */
   output: string[];
+  /** In a checkout with reduce: what reslop left in .log/ and was taken back. */
+  logs?: LogCleanup;
 }
 
 export { NAME_PATTERN } from './names.ts';
@@ -135,6 +141,13 @@ export interface HookRunOptions {
    */
   reslop?: string;
   signal?: AbortSignal;
+  /**
+   * The hook runs in the person's own checkout (`warband check`, a trial run
+   * from the window), not in a task worktree. With reduce, what reslop
+   * records in .log/ there is then taken back after the run, see
+   * `keepLogsClean`. In a worktree .log/ is archived with the run instead.
+   */
+  inCheckout?: boolean;
 }
 
 // Colour and cursor codes: the output is read by a model and shown as text.
@@ -144,6 +157,14 @@ const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;?]*[A-Za-
 const REDUCED_TAIL = 200;
 
 export async function runHook(hook: Hook, cwd: string, options: HookRunOptions = {}): Promise<HookResult> {
+  if (!options.inCheckout || !(hook.reduce && options.reslop)) return runOnce(hook, cwd, options);
+  // The hard links of what was in .log/ wait in .warband, the one folder of the project Warband writes to.
+  const hold = join(options.warbandDir ?? join(cwd, '.warband'), `.hold-${process.pid}-${Date.now()}`);
+  const { result, cleanup } = await keepLogsClean(cwd, hold, () => runOnce(hook, cwd, options));
+  return { ...result, logs: cleanup };
+}
+
+async function runOnce(hook: Hook, cwd: string, options: HookRunOptions): Promise<HookResult> {
   const output: string[] = [];
   let exitCode: number | null = null;
   let timedOut = false;

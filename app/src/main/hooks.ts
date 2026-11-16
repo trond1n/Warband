@@ -1,10 +1,7 @@
-import { join } from 'node:path';
-
 import { expandRun, runHook } from '../../../src/core/hooks.ts';
 import type { HookProblem } from '../../../src/core/hooks.ts';
 import { deleteHook, HookInUseError, HookInvalidError, hookFromInput, HooksChangedError, listAgents, readHooks, saveHook, warbandDir } from '../../../src/core/workspace.ts';
 import type { HookInput } from '../../../src/core/workspace.ts';
-import { keepLogsClean } from '../../../src/core/reslop-logs.ts';
 import type { DeleteHookResult, HookInfo, HooksView, SaveHookResult, TrialRequest, TrialResult } from '../shared/api.ts';
 
 /*
@@ -111,10 +108,8 @@ export class HookService {
       const { hook } = hookFromInput(input, root);
       const reslop = this.#options.reslop();
       const started = Date.now();
-      const run = (): ReturnType<typeof runHook> => runHook(hook, root, { warbandDir: warbandDir(root), ...(reslop ? { reslop } : {}), signal: controller.signal });
-      // reslop records each run in .log/ of the checkout; a trial from the window takes that back.
-      const hold = join(warbandDir(root), `.trial-hold-${process.pid}-${started}`);
-      const { result, cleanup } = request.reduced ? await keepLogsClean(root, hold, run) : { result: await run(), cleanup: undefined };
+      // In the checkout, as `warband check`: what reslop records in .log/ is taken back.
+      const result = await runHook(hook, root, { warbandDir: warbandDir(root), ...(reslop ? { reslop } : {}), signal: controller.signal, inCheckout: true });
       return {
         status: controller.signal.aborted ? 'cancelled' : 'finished',
         command: request.command,
@@ -125,7 +120,7 @@ export class HookService {
         reduced: result.reduced,
         seconds: (Date.now() - started) / 1000,
         output: result.output,
-        ...(cleanup ? { logs: cleanup } : {}),
+        ...(result.logs ? { logs: result.logs } : {}),
       };
     } finally {
       this.#trial = undefined;

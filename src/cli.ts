@@ -249,7 +249,9 @@ async function check(root: string, agentName: string | undefined, stage: string 
   const reslop = await which('reslop');
   for (const hook of hooks) {
     console.log(`\n[${hook.stage}] ${hook.name}: ${hook.run}${hook.reduce && reslop ? ' (through reslop)' : ''}`);
-    const result = await runHook(hook, root, { warbandDir: warbandDir(root), ...(reslop ? { reslop } : {}) });
+    // Here, in the person's checkout, what reslop records in .log/ is taken back after the run.
+    const result = await runHook(hook, root, { warbandDir: warbandDir(root), ...(reslop ? { reslop } : {}), inCheckout: true });
+    if (result.logs && result.logs.removed.length > 0) console.log(`  (reslop's log of this run in .log/ removed: ${result.logs.removed.length} files)`);
     if (!result.ok) {
       failed += 1;
       for (const line of result.output) console.log(`  ${line}`);
