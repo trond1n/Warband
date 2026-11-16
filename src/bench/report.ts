@@ -65,6 +65,13 @@ function table(header: readonly string[], rows: readonly (readonly string[])[]):
   return [line(header), line(widths.map((w) => '-'.repeat(w))), ...rows.map(line)];
 }
 
+/** Local date and time of an ISO timestamp, to the minute. */
+const when = (iso: string): string => {
+  const d = new Date(iso);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+
 const share = (n: number, of: number): string => (of === 1 ? (n === 1 ? 'yes' : 'no') : `${n}/${of}`);
 
 const roleLine = (report: BenchReport, role: Role): string => {
@@ -94,7 +101,7 @@ export function renderReport(report: BenchReport): string[] {
   const runsAll = summaries.reduce((n, s) => n + s.runs, 0);
   const lines = [
     `Bench of /${report.agent.name}: implementer ${roleLine(report, 'implementer')}, reviewer ${roleLine(report, 'reviewer')}`,
-    `Skills: ${report.agent.skills.join(', ') || 'none'}. ${report.started.slice(0, 16).replace('T', ' ')}, ${runsAll} run(s)${repeat > 1 ? `, ${repeat} per task` : ''}.`,
+    `Skills: ${report.agent.skills.join(', ') || 'none'}. ${when(report.started)}, ${runsAll} run(s)${repeat > 1 ? `, ${repeat} per task` : ''}.`,
     '',
     ...table(['task', 'verify', 'want', 'as expected', 'reworks', 'review', 'protected', 'denied', 'time', 'calls'], rows),
     '',
@@ -114,7 +121,7 @@ export function compareReports(a: BenchReport, b: BenchReport): string[] {
   const sa = new Map(summarize(a).map((s) => [s.key, s]));
   const sb = new Map(summarize(b).map((s) => [s.key, s]));
   const keys = [...new Set([...sa.keys(), ...sb.keys()])];
-  const lines = [`A: ${a.started.slice(0, 16).replace('T', ' ')}, /${a.agent.name}`, `B: ${b.started.slice(0, 16).replace('T', ' ')}, /${b.agent.name}`];
+  const lines = [`A: ${when(a.started)}, /${a.agent.name}`, `B: ${when(b.started)}, /${b.agent.name}`];
   for (const role of ['implementer', 'reviewer'] as const) {
     const ra = roleLine(a, role);
     const rb = roleLine(b, role);
