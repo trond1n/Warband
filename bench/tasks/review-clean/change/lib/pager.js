@@ -24,7 +24,8 @@ function pageCount(total, perPage = DEFAULT_PER_PAGE) {
 /** Throws PageError when `total` items have no page number `page`. */
 function checkPage(page, total, perPage = DEFAULT_PER_PAGE) {
   const pages = pageCount(total, perPage);
-  if (!(page >= 1 && page <= pages)) throw new PageError(`page ${page} is out of range 1..${pages}`);
+  const outside = page < 1 || page > pages;
+  if (outside) throw new PageError(`page ${page} is out of range 1..${pages}`);
 }
 
 /**

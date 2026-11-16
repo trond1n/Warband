@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
@@ -319,4 +320,54 @@ test('warband bench shows the runs and the model calls it will take, and runs no
   assert.equal(compared.code, 0, compared.out);
   assert.match(compared.out, /reviewer: claude opus \(CLI 2\.1\.325\) -> claude fable \(CLI 2\.1\.330\)/);
   assert.match(compared.out, /review-clean\s+100% -> 100%/);
+});
+
+/** setup/ with the task's change/ copied over it, in a temp folder. */
+async function applied(id: string): Promise<{ before: string; after: string }> {
+  const dir = await mkdtemp(join(tmpdir(), `warband-bench-${id}-`));
+  after(() => rm(dir, { recursive: true, force: true }));
+  const t = task(id);
+  await cp(join(t.dir, 'setup'), join(dir, 'before'), { recursive: true });
+  await cp(join(t.dir, 'setup'), join(dir, 'after'), { recursive: true });
+  await cp(join(t.dir, 'change'), join(dir, 'after'), { recursive: true, force: true });
+  return { before: join(dir, 'before'), after: join(dir, 'after') };
+}
+
+test('review-clean really is clean: the change behaves the same for any input, NaN and undefined included', async () => {
+  const { before, after: changed } = await applied('review-clean');
+  const load = (dir: string): Record<string, (...args: unknown[]) => unknown> => createRequire(join(dir, 'package.json'))('./lib/pager.js');
+  const a = load(before);
+  const b = load(changed);
+  const outcome = (f: (...args: unknown[]) => unknown, args: unknown[]): string => {
+    try {
+      return JSON.stringify(f(...args)) ?? 'undefined';
+    } catch (err) {
+      return `throws ${(err as Error).constructor.name}: ${(err as Error).message}`;
+    }
+  };
+  const pages = [NaN, undefined, null, 'abc', '2', -1, 0, 1, 2, 3, 4, 1.5, Infinity, -Infinity];
+  const totals = [45, 0, NaN, undefined, -3, 'x'];
+  for (const fn of ['checkPage', 'pageBounds', 'pageLabel', 'paginate', 'clampPage', 'pageCount']) {
+    for (const page of pages) {
+      for (const total of totals) {
+        const args = fn === 'paginate' ? [Array.from({ length: 45 }, (_, i) => i), page, total] : [page, total, 20];
+        assert.equal(outcome(b[fn] as never, args), outcome(a[fn] as never, args), `${fn}(${String(page)}, ${String(total)})`);
+      }
+    }
+  }
+});
+
+test('review-bug really breaks report.js: its tests pass, but the page subtotals no longer add up', async () => {
+  const { after: changed } = await applied('review-bug');
+  const node = (args: string[]): string => {
+    const out = spawnSync(process.execPath, args, { cwd: changed, encoding: 'utf8' });
+    assert.equal(out.status, 0, out.stderr);
+    return out.stdout;
+  };
+  assert.match(node(['test/pager.test.js']), /all tests passed/);
+  const report = node(['report.js', 'ledger.csv']);
+  const subtotals = [...report.matchAll(/page subtotal\s+([\d.]+)/g)].reduce((sum, m) => sum + Number(m[1]), 0);
+  const grand = Number(/grand total\s+([\d.]+)/.exec(report)?.[1]);
+  assert.equal(grand, 1035);
+  assert.notEqual(subtotals, grand);
 });
