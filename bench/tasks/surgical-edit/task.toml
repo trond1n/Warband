@@ -1,0 +1,11 @@
+[task]
+timeout_seconds = 600
+tags = ["edit", "restraint", "hard"]
+source = "mark2 bench T10-yaml-surgical; deploy.yaml and the prompt as they are there"
+license = "MIT, see ../LICENSE-mark2.txt"
+
+# No checks: nothing to run, the result is compared byte for byte by verify.
+
+[expect]
+status = "done"
+verify = "pass"

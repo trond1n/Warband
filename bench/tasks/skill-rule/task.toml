@@ -1,0 +1,31 @@
+[task]
+timeout_seconds = 600
+tags = ["skills", "instructions"]
+
+[checks]
+test = "node test.js"
+
+# The rule lives only in the skill (skill.md): nothing in the repository or
+# the prompt asks for a changelog. The task runs twice, with the skill added
+# to the agent's own skills and without it. verify checks the rule in the
+# result, so the pair shows whether the agent follows its skills.
+[skill]
+name = "changelog"
+file = "skill.md"
+
+[expect]
+status = "done"
+
+[variants.with-skill]
+skill = true
+
+[variants.with-skill.expect]
+verify = "pass"
+
+[variants.without-skill]
+skill = false
+
+# Without the skill nothing asks for the changelog: a failing verify is the
+# expected outcome, and the difference to with-skill is the skill's effect.
+[variants.without-skill.expect]
+verify = "fail"

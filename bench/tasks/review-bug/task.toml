@@ -1,0 +1,25 @@
+[task]
+timeout_seconds = 600
+tags = ["review", "recall"]
+source = "mark2 bench T20-review-bug, ported from Python to JavaScript"
+license = "MIT, see ../LICENSE-mark2.txt"
+# One review, no rework: the run stops at the reviewer's first verdict.
+max_reworks = 0
+
+[checks]
+test = "node test/pager.test.js"
+
+# Measures the reviewer. The planner and the implementer are scripted: the
+# implementer applies change/, which moves pageBounds() to a half-open range
+# and updates paginate() and the tests, so the checks pass. report.js still
+# slices rows.slice(first, last + 1): every page takes the first row of the
+# next one, and the subtotals no longer add up to the grand total. report.js
+# is not in the diff and the task does not mention it.
+[scripted]
+planner = true
+implementer = ["change"]
+
+[expect]
+status = "halted"
+verify = "pass"
+review = "changes_requested"

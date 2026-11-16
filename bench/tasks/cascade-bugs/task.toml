@@ -1,0 +1,17 @@
+[task]
+timeout_seconds = 900
+tags = ["edit", "verify-loop", "hard"]
+source = "mark2 bench T11-cascade-bugs, ported from Python to JavaScript"
+license = "MIT, see ../LICENSE-mark2.txt"
+
+[checks]
+test = "node test.js"
+
+# The test stops at the first failure, so the three bugs show one at a time.
+# An implementer without a shell sees them through the check: a return to
+# implement is expected. Fixing all three at once from the doc comments is
+# better still; that shows as an unmet expectation, not a failure.
+[expect]
+status = "done"
+verify = "pass"
+reworks_min = 1

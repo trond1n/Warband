@@ -1,0 +1,13 @@
+[task]
+timeout_seconds = 600
+tags = ["edit", "verify-loop", "baseline"]
+source = "mark2 bench T04-fix-bug-test, ported from Python to JavaScript"
+license = "MIT, see ../LICENSE-mark2.txt"
+
+# Hooks of the checks stage, name = command, run in the run's worktree.
+[checks]
+test = "node test.js"
+
+[expect]
+status = "done"
+verify = "pass"
