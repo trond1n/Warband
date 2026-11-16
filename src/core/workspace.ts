@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import { normalizeName } from './agents.ts';
 import type { AgentDefinition, Skill } from './agents.ts';
@@ -185,9 +185,11 @@ export async function loadProtected(root: string): Promise<ProtectedRules> {
   };
 }
 
+const hooksText = (hooks: readonly Hook[]): string => `${JSON.stringify({ hooks }, null, 2)}\n`;
+
 export async function saveHooks(root: string, hooks: readonly Hook[]): Promise<void> {
   await mkdir(warbandDir(root), { recursive: true });
-  await writeFile(hooksFile(root), `${JSON.stringify({ hooks }, null, 2)}\n`);
+  await writeFile(hooksFile(root), hooksText(hooks));
 }
 
 /** What a person fills in for a hook: environment variables as rows, which may repeat or be blank. */
@@ -263,17 +265,110 @@ export async function hookUsers(root: string, name: string): Promise<string[]> {
   return (await listAgents(root)).filter((a) => a.hooks.includes(name)).map((a) => a.name);
 }
 
+/** A file to write, or to remove when `text` is null. */
+export interface FileChange {
+  path: string;
+  text: string | null;
+}
+
+/**
+ * Writes several files as one change: either all of them end up with their
+ * new content or all keep what they had. Every new text is written next to
+ * its file first; the swaps come after, and if one fails, the files already
+ * swapped get their old content back. Not proof against a power cut in the
+ * middle, but no error leaves agents pointing at a name that is gone.
+ */
+export async function commitFiles(changes: readonly FileChange[]): Promise<void> {
+  const before = await Promise.all(
+    changes.map(async (c) => {
+      try {
+        return await readFile(c.path, 'utf8');
+      } catch (err) {
+        if (isMissing(err)) return null;
+        throw err;
+      }
+    }),
+  );
+  const temp = (path: string): string => `${path}.warband-${process.pid}.tmp`;
+  const staged: string[] = [];
+  try {
+    for (const c of changes) {
+      if (c.text === null) continue;
+      await mkdir(dirname(c.path), { recursive: true });
+      await writeFile(temp(c.path), c.text, { flag: 'wx' });
+      staged.push(temp(c.path));
+    }
+  } catch (err) {
+    await Promise.all(staged.map((p) => rm(p, { force: true })));
+    throw err;
+  }
+  const done: number[] = [];
+  try {
+    for (const [i, c] of changes.entries()) {
+      if (c.text === null) await rm(c.path);
+      else await rename(temp(c.path), c.path);
+      done.push(i);
+    }
+  } catch (err) {
+    for (const i of done.reverse()) {
+      const c = changes[i] as FileChange;
+      const old = before[i];
+      if (old === null || old === undefined) await rm(c.path, { force: true });
+      else await writeFile(c.path, old);
+    }
+    await Promise.all(changes.map((c) => (c.text === null ? undefined : rm(temp(c.path), { force: true }))));
+    throw err;
+  }
+}
+
+/**
+ * The agent files that list `from` under `kind`, rewritten to list `to`
+ * instead. The rest of each file stays as it was: the JSON is edited, not
+ * re-made from the parsed definition.
+ */
+async function renamedReferences(root: string, kind: 'hooks' | 'skills', from: string, to: string): Promise<{ agents: string[]; changes: FileChange[] }> {
+  let files: string[];
+  try {
+    files = await readdir(agentsDir(root));
+  } catch (err) {
+    if (isMissing(err)) return { agents: [], changes: [] };
+    throw err;
+  }
+  const agents: string[] = [];
+  const changes: FileChange[] = [];
+  for (const file of files.filter((f) => f.endsWith('.json')).sort()) {
+    const path = join(agentsDir(root), file);
+    const data = await readJson(path);
+    const agent = parseAgent(data, path);
+    if (!agent[kind].includes(from)) continue;
+    const raw = data as Record<string, unknown>;
+    raw[kind] = (raw[kind] as string[]).map((n) => (n === from ? to : n));
+    agents.push(agent.name);
+    changes.push({ path, text: `${JSON.stringify(raw, null, 2)}\n` });
+  }
+  return { agents, changes };
+}
+
+const sameSet = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x) => b.includes(x));
+
 export interface SaveHookOptions {
   /** The name the hook had when the form opened; absent for a new hook. */
   original?: string;
   /** From `readHooks`; a file that changed since is not written over. */
   expectedVersion?: string;
+  /**
+   * The agents the person agreed to update when the hook is renamed. A
+   * rename of a used hook goes ahead only when this is exactly the list of
+   * agents that use it now.
+   */
+  renameAgents?: readonly string[];
 }
 
 /**
  * Creates or updates one hook in hooks.json, keeping the others and their
- * order. A new name must be free. A hook that agents use keeps its name:
- * renaming it would leave those agents pointing at nothing.
+ * order. A new name must be free. Renaming a hook that agents use updates
+ * their hook lists in the same change, once the caller passes the list of
+ * those agents as confirmed; otherwise the problem names them.
  */
 export async function saveHook(root: string, input: HookInput, options: SaveHookOptions = {}): Promise<HooksSnapshot & { hook: Hook }> {
   const { hook, problems } = hookFromInput(input, root);
@@ -285,20 +380,23 @@ export async function saveHook(root: string, input: HookInput, options: SaveHook
   if (hook.name !== original && hooks.some((h) => h.name === hook.name)) {
     problems.unshift({ field: 'name', code: 'name-taken', message: `hook "${hook.name}" already exists` });
   }
-  if (original !== undefined && hook.name !== original) {
-    const agents = await hookUsers(root, original);
-    if (agents.length > 0) {
+  let references: FileChange[] = [];
+  if (original !== undefined && hook.name !== original && problems.length === 0) {
+    const { agents, changes } = await renamedReferences(root, 'hooks', original, hook.name);
+    if (agents.length > 0 && !sameSet(agents, options.renameAgents ?? [])) {
       problems.unshift({
         field: 'name',
         code: 'rename-in-use',
         agents,
-        message: `hook "${original}" is used by ${agents.map((a) => `/${a}`).join(', ')}, so it keeps its name`,
+        message: `hook "${original}" is used by ${agents.map((a) => `/${a}`).join(', ')}; confirm renaming it there too`,
       });
     }
+    references = changes;
   }
   if (problems.length > 0) throw new HookInvalidError(problems);
   const next = original === undefined ? [...hooks, hook] : hooks.map((h) => (h.name === original ? hook : h));
-  await saveHooks(root, next);
+  await mkdir(warbandDir(root), { recursive: true });
+  await commitFiles([{ path: hooksFile(root), text: hooksText(next) }, ...references]);
   return { ...(await readHooks(root)), hook };
 }
 

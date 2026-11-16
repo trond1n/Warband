@@ -138,3 +138,67 @@ test('one trial at a time, and a running one can be stopped', async () => {
   assert.equal(svc.running, false);
 });
 
+test('renaming a used hook goes through once the agents are confirmed', async () => {
+  const root = await project();
+  const svc = service();
+  const saved = await svc.save(root, input(), undefined, 'none');
+  assert.ok(saved.ok);
+  await saveAgent(root, { name: 'dev', description: '', skills: [], hooks: ['unit'], roles: { implementer: { runner: 'claude' }, reviewer: { runner: 'claude', model: 'opus' } } });
+  const asked = await svc.save(root, input({ name: 'tests' }), 'unit', saved.version);
+  assert.ok(!asked.ok && 'problems' in asked);
+  assert.deepEqual(asked.problems.map((p) => [p.code, p.agents]), [['rename-in-use', ['dev']]]);
+  const renamed = await svc.save(root, input({ name: 'tests' }), 'unit', saved.version, ['dev']);
+  assert.ok(renamed.ok);
+  assert.deepEqual((await svc.view(root)).hooks.map((h) => [h.hook.name, h.usedBy]), [['tests', ['dev']]]);
+});
+
+/**
+ * A stand-in for reslop on PATH: like `reslop t`, it records the run in .log/
+ * of its folder, drops the oldest record, and passes the exit code through.
+ */
+async function fakeReslop(): Promise<string> {
+  const dir = await project();
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(
+    join(dir, 'fake-reslop.mjs'),
+    `import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { execSync } from 'node:child_process';
+const command = process.argv.slice(process.argv.indexOf('--') + 1).join(' ');
+mkdirSync('.log/.runs', { recursive: true });
+for (const ext of ['json', 'log', 'raw']) writeFileSync('.log/2026-11-16-node-01.' + ext, ext);
+writeFileSync('.log/.runs/r.json', '{}');
+rmSync('.log/2026-01-01-old-01.json', { force: true });
+let code = 0;
+try { execSync(command, { stdio: 'inherit' }); } catch (e) { code = e.status ?? 1; }
+console.log('reduced report');
+process.exit(code);
+`,
+  );
+  await writeFile(join(dir, 'reslop.cmd'), '@node "%~dp0fake-reslop.mjs" %*\r\n');
+  await writeFile(join(dir, 'reslop'), '#!/bin/sh\nexec node "$(dirname "$0")/fake-reslop.mjs" "$@"\n', { mode: 0o755 });
+  return dir;
+}
+
+test('a trial run with reduce leaves .log/ of the checkout as it was', async () => {
+  const root = await project();
+  const bin = await fakeReslop();
+  const { mkdir, readdir, writeFile } = await import('node:fs/promises');
+  await mkdir(join(root, '.log'));
+  await writeFile(join(root, '.log', 'mine.txt'), 'the person keeps this');
+  await writeFile(join(root, '.log', '2026-01-01-old-01.json'), 'an old record');
+  const path = process.env['PATH'];
+  process.env['PATH'] = `${bin}${process.platform === 'win32' ? ';' : ':'}${path ?? ''}`;
+  try {
+    const result = await confirmAndRun(service(join(bin, 'reslop')), root, input({ run: node('process.exit(2)'), reduce: true }));
+    assert.ok(result.status === 'finished');
+    assert.equal(result.reduced, true);
+    assert.equal(result.exitCode, 2);
+    assert.deepEqual(result.output, ['reduced report']);
+    assert.equal(result.logs?.removed.length, 4);
+    assert.deepEqual(result.logs?.restored, ['2026-01-01-old-01.json']);
+  } finally {
+    process.env['PATH'] = path;
+  }
+  assert.deepEqual((await readdir(join(root, '.log'))).sort(), ['2026-01-01-old-01.json', 'mine.txt']);
+  assert.equal(existsSync(join(root, '.warband')), false);
+});

@@ -124,6 +124,16 @@ const short = (value: unknown, max: number, what: string): string => {
   return value;
 };
 
+/** Agent names the person confirmed for a rename; each checked like any name before use. */
+function agentNames(value: unknown): string[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length > 500) throw new Error('agent names expected');
+  return value.map((n: unknown) => {
+    if (typeof n !== 'string' || !NAME_PATTERN.test(n)) throw new Error('agent name expected');
+    return n;
+  });
+}
+
 /** Shape and size only; names, policy and variables are validated by the core. */
 function hookInput(value: unknown): HookInput {
   const v = value as Record<string, unknown> | null;
@@ -273,8 +283,8 @@ function registerIpc(): void {
     watchWorkspace(project);
     return hooks.view(project);
   });
-  handle('saveHook', async (root, input, original, version) =>
-    hooks.save(await knownProject(root), hookInput(input), original === null ? undefined : hookName(original), text(version, 'version')),
+  handle('saveHook', async (root, input, original, version, renameAgents) =>
+    hooks.save(await knownProject(root), hookInput(input), original === null ? undefined : hookName(original), text(version, 'version'), agentNames(renameAgents)),
   );
   handle('deleteHook', async (root, name, version) => hooks.remove(await knownProject(root), hookName(name), text(version, 'version')));
   handle('trialRequest', async (root, input) => hooks.request(await knownProject(root), hookInput(input)));

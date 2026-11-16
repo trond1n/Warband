@@ -36,8 +36,9 @@ export const formOf = (hook: Hook): HookForm => ({
 });
 
 /**
- * What the form sends to the core. `reduce` only goes with the checks stage,
- * as in the wizard, which asks about reslop for checks hooks only.
+ * What the form sends to the core, as the person left it. `reduce` on a
+ * stage other than checks is sent too: the core refuses it with a problem at
+ * the field, and the person decides whether to drop it or change the stage.
  */
 export const inputOf = (form: HookForm): HookInput => ({
   name: form.name,
@@ -45,14 +46,17 @@ export const inputOf = (form: HookForm): HookInput => ({
   run: form.run,
   stage: form.stage,
   env: form.env.map(([k, v]) => [k, v] as const),
-  reduce: form.stage === 'checks' && form.reduce,
+  reduce: form.reduce,
 });
+
+/** A name as the core stores it: "/Unit " is "unit". */
+export const normalName = (name: string): string => name.trim().replace(/^\/+/, '').toLowerCase();
 
 /** The form as the core would store it, for comparing; the core still validates the real thing. */
 function normalized(form: HookForm): string {
   const input = inputOf(form);
   return JSON.stringify({
-    name: input.name.trim().replace(/^\/+/, '').toLowerCase(),
+    name: normalName(input.name),
     description: input.description.trim(),
     run: input.run.trim(),
     stage: input.stage,
@@ -94,7 +98,7 @@ export function problemText(problem: HookProblem, original?: string): string {
     case 'name-taken':
       return 'Хук с таким именем уже есть.';
     case 'rename-in-use':
-      return `Хук используют агенты ${agentList(problem.agents)}: с новым именем они остались бы без него. Сохраните его под прежним именем${original ? ` «${original}»` : ''} или сделайте копию кнопкой «Дублировать».`;
+      return `Хук${original ? ` «${original}»` : ''} используют агенты ${agentList(problem.agents)}. Переименование обновит ссылки в них; сохраните ещё раз и подтвердите список.`;
     case 'run-empty':
       return 'Укажите команду.';
     case 'run-denied':
@@ -105,6 +109,8 @@ export function problemText(problem: HookProblem, original?: string): string {
       return problem.key ? `«${problem.key}»: имя переменной из латинских букв, цифр и _, не начинается с цифры.` : 'У переменной со значением нет имени.';
     case 'env-name-duplicate':
       return `«${problem.key ?? ''}» указана дважды.`;
+    case 'reduce-stage':
+      return 'reduce действует только на стадии checks: там короткий отчёт reslop возвращается на доработку. Снимите флажок или выберите стадию checks.';
   }
 }
 

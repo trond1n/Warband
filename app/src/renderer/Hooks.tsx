@@ -3,14 +3,15 @@ import type { ReactNode } from 'react';
 
 import type { HookInfo, HookProblem, HooksView as View, TrialResult } from '../shared/api.ts';
 import { useConfirm } from './Dialog.tsx';
-import { blankForm, copyName, formOf, inputOf, isDirty, problemText, secondsText, STAGES, usedByText } from './hooks-model.ts';
+import { blankForm, copyName, formOf, inputOf, isDirty, normalName, problemText, secondsText, STAGES, usedByText } from './hooks-model.ts';
 import type { HookForm } from './hooks-model.ts';
 import type { LeaveGuard } from './Providers.tsx';
 
 /*
  * The project's hooks: the list on the left, one hook's form on the right.
  * Every write goes through the core (saveHook, deleteHook) in the main
- * process; the trial run is confirmed there too, in a native dialog.
+ * process. A trial run shows the exact command line in a modal first, and
+ * the main process runs only the command that was confirmed.
  */
 
 /** What the form is showing: nothing, a saved hook by its name, or a new one. */
@@ -92,11 +93,46 @@ export function HooksView({ root, setGuard }: { root: string; setGuard(guard: Le
     setTrial(undefined);
   };
 
+  /** Asks before a rename rewrites agent files; true when the person agrees. */
+  const confirmRename = (from: string, to: string, agents: string[]): Promise<boolean> =>
+    ask({
+      title: `Переименовать хук «${from}» в «${to}»?`,
+      body: (
+        <>
+          <p>Хук используют агенты. В их файлах ссылка поменяется на новое имя:</p>
+          <ul className="plain">
+            {agents.map((a) => (
+              <li key={a}>
+                <code>/{a}</code> <span className="muted small">.warband/agents/{a}.json</span>
+              </li>
+            ))}
+          </ul>
+          <p className="muted">Хук и агенты меняются одной операцией: если что-то не запишется, всё останется как было.</p>
+        </>
+      ),
+      confirm: 'Переименовать',
+    });
+
   const save = async (): Promise<void> => {
     if (!view || busy || mode.kind === 'none') return;
+    const original = mode.kind === 'edit' ? mode.name : null;
+    const newName = normalName(form.name);
+    let renameAgents: string[] | undefined;
+    if (original !== null && newName !== original && saved?.usedBy && saved.usedBy.length > 0) {
+      if (!(await confirmRename(original, newName, saved.usedBy))) return;
+      renameAgents = saved.usedBy;
+    }
     setBusy(true);
     setMessage('');
-    const result = await window.warband.saveHook(root, inputOf(form), mode.kind === 'edit' ? mode.name : null, view.version);
+    let result = await window.warband.saveHook(root, inputOf(form), original, view.version, renameAgents);
+    // The agents that use the hook changed since the list was shown (or were unknown): ask again with the list of now.
+    const again = !result.ok && 'problems' in result && result.problems.length === 1 ? result.problems.find((p) => p.code === 'rename-in-use') : undefined;
+    if (again && original !== null) {
+      setBusy(false);
+      if (!(await confirmRename(original, newName, again.agents ?? []))) return;
+      setBusy(true);
+      result = await window.warband.saveHook(root, inputOf(form), original, view.version, again.agents ?? []);
+    }
     setBusy(false);
     if (result.ok) {
       // Our own write must not look like someone else's change when the watcher reports it.
@@ -335,12 +371,20 @@ export function HooksView({ root, setGuard }: { root: string; setGuard(guard: Le
 
             <div className="field">
               <label className="check">
-                <input type="checkbox" checked={form.stage === 'checks' && form.reduce} disabled={form.stage !== 'checks'} onChange={(e) => setForm({ ...form, reduce: e.target.checked })} />
+                <input
+                  type="checkbox"
+                  checked={form.reduce}
+                  // Off on another stage there is nothing to choose; on, the person can always take it off.
+                  disabled={form.stage !== 'checks' && !form.reduce}
+                  aria-invalid={problems.some((p) => p.field === 'reduce')}
+                  onChange={(e) => setForm({ ...form, reduce: e.target.checked })}
+                />
                 <span>
                   reduce: пропускать вывод через <code>reslop t</code>, чтобы ошибка возвращалась коротким отчётом
-                  {form.stage !== 'checks' && <span className="muted"> (только для стадии checks, как в мастере)</span>}
+                  {form.stage !== 'checks' && <span className="muted"> (только для стадии checks)</span>}
                 </span>
               </label>
+              <FieldProblems problems={problems} field="reduce" />
               {reslopNote}
             </div>
 
@@ -464,6 +508,13 @@ function TrialView({ result }: { result: TrialResult }): ReactNode {
         {result.reduced ? 'Короткий отчёт reslop' : 'Последние строки вывода'} ({result.output.length}):
       </div>
       <pre className="trial-output">{result.output.length > 0 ? result.output.join('\n') : '(вывода нет)'}</pre>
+      {result.logs && (result.logs.removed.length > 0 || result.logs.restored.length > 0) && (
+        <p className="muted small">
+          reslop записал журнал этого запуска в <code>.log/</code> рабочей копии; он убран (файлов: {result.logs.removed.length})
+          {result.logs.restored.length > 0 && <>, а старые записи, которые reslop удалил при ротации, возвращены (файлов: {result.logs.restored.length})</>}. Остальное в
+          .log/ не тронуто.
+        </p>
+      )}
     </div>
   );
 }

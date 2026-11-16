@@ -1,7 +1,10 @@
+import { join } from 'node:path';
+
 import { expandRun, runHook } from '../../../src/core/hooks.ts';
 import type { HookProblem } from '../../../src/core/hooks.ts';
 import { deleteHook, HookInUseError, HookInvalidError, hookFromInput, HooksChangedError, listAgents, readHooks, saveHook, warbandDir } from '../../../src/core/workspace.ts';
 import type { HookInput } from '../../../src/core/workspace.ts';
+import { keepLogsClean } from '../../../src/core/reslop-logs.ts';
 import type { DeleteHookResult, HookInfo, HooksView, SaveHookResult, TrialRequest, TrialResult } from '../shared/api.ts';
 
 /*
@@ -53,9 +56,14 @@ export class HookService {
     return { ...base, hooks, version: snapshot.version, ...(agentsError ? { agentsError } : {}) };
   }
 
-  async save(root: string, input: HookInput, original: string | undefined, version: string): Promise<SaveHookResult> {
+  /** `renameAgents`: the agents the person agreed to update when a used hook gets a new name. */
+  async save(root: string, input: HookInput, original: string | undefined, version: string, renameAgents?: readonly string[]): Promise<SaveHookResult> {
     try {
-      const saved = await saveHook(root, input, { ...(original !== undefined ? { original } : {}), expectedVersion: version });
+      const saved = await saveHook(root, input, {
+        ...(original !== undefined ? { original } : {}),
+        expectedVersion: version,
+        ...(renameAgents ? { renameAgents } : {}),
+      });
       return { ok: true, version: saved.version, name: saved.hook.name };
     } catch (err) {
       if (err instanceof HookInvalidError) return { ok: false, problems: err.problems };
@@ -103,7 +111,10 @@ export class HookService {
       const { hook } = hookFromInput(input, root);
       const reslop = this.#options.reslop();
       const started = Date.now();
-      const result = await runHook(hook, root, { warbandDir: warbandDir(root), ...(reslop ? { reslop } : {}), signal: controller.signal });
+      const run = (): ReturnType<typeof runHook> => runHook(hook, root, { warbandDir: warbandDir(root), ...(reslop ? { reslop } : {}), signal: controller.signal });
+      // reslop records each run in .log/ of the checkout; a trial from the window takes that back.
+      const hold = join(warbandDir(root), `.trial-hold-${process.pid}-${started}`);
+      const { result, cleanup } = request.reduced ? await keepLogsClean(root, hold, run) : { result: await run(), cleanup: undefined };
       return {
         status: controller.signal.aborted ? 'cancelled' : 'finished',
         command: request.command,
@@ -114,6 +125,7 @@ export class HookService {
         reduced: result.reduced,
         seconds: (Date.now() - started) / 1000,
         output: result.output,
+        ...(cleanup ? { logs: cleanup } : {}),
       };
     } finally {
       this.#trial = undefined;

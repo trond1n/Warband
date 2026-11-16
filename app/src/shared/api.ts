@@ -7,6 +7,7 @@
 import type { AgentDefinition } from '../../../src/core/agents.ts';
 import type { Hook, HookProblem } from '../../../src/core/hooks.ts';
 import type { HookInput } from '../../../src/core/workspace.ts';
+import type { LogCleanup } from '../../../src/core/reslop-logs.ts';
 import type { EngineEvent, GateDecision } from '../../../src/engine/run.ts';
 import type { Finding } from '../../../src/engine/plan-file.ts';
 import type { ProtectedChange } from '../../../src/core/protected.ts';
@@ -194,6 +195,8 @@ export type TrialResult =
       seconds: number;
       /** Last lines of stdout and stderr together. */
       output: string[];
+      /** With reduce: what reslop left in .log/ of the checkout and was taken back. */
+      logs?: LogCleanup;
     };
 
 export interface AppState {
@@ -230,8 +233,11 @@ export interface WarbandApi {
   /** providers.json changed on disk. */
   onProvidersChanged(listener: () => void): () => void;
   hooks(root: string): Promise<HooksView>;
-  /** `original`: the name the hook had when the form opened; null for a new hook. */
-  saveHook(root: string, input: HookInput, original: string | null, version: string): Promise<SaveHookResult>;
+  /**
+   * `original`: the name the hook had when the form opened; null for a new hook.
+   * `renameAgents`: the agents the person agreed to update when a used hook is renamed.
+   */
+  saveHook(root: string, input: HookInput, original: string | null, version: string, renameAgents?: string[]): Promise<SaveHookResult>;
   deleteHook(root: string, name: string, version: string): Promise<DeleteHookResult>;
   /** The exact command line, folder and variables a trial run of the form would use, or why it cannot run. */
   trialRequest(root: string, input: HookInput): Promise<TrialRequest | { problems: HookProblem[] }>;

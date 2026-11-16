@@ -46,7 +46,16 @@ export const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
 /** An environment variable name that every shell and OS takes as is. */
 export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-export type HookProblemCode = 'name-invalid' | 'name-taken' | 'rename-in-use' | 'run-empty' | 'run-denied' | 'stage-unknown' | 'env-name-invalid' | 'env-name-duplicate';
+export type HookProblemCode =
+  | 'name-invalid'
+  | 'name-taken'
+  | 'rename-in-use'
+  | 'run-empty'
+  | 'run-denied'
+  | 'stage-unknown'
+  | 'env-name-invalid'
+  | 'env-name-duplicate'
+  | 'reduce-stage';
 
 /**
  * One reason a hook cannot be saved, with the field it belongs to. `message`
@@ -54,14 +63,14 @@ export type HookProblemCode = 'name-invalid' | 'name-taken' | 'rename-in-use' | 
  * `code`.
  */
 export interface HookProblem {
-  field: 'name' | 'run' | 'stage' | 'env';
+  field: 'name' | 'run' | 'stage' | 'env' | 'reduce';
   code: HookProblemCode;
   message: string;
   /** run-denied: the policy rule that denied the command. */
   rule?: string;
   /** env-name-*: the variable name. */
   key?: string;
-  /** rename-in-use: agents that use the hook under its old name. */
+  /** rename-in-use: agents that use the hook under its old name and would have their references updated. */
   agents?: string[];
 }
 
@@ -81,6 +90,14 @@ export function checkHook(hook: Hook, workspace: string): HookProblem[] {
       code: 'run-denied',
       message: `hook "${hook.name}" is denied by policy: ${decision.reason ?? decision.rule ?? 'deny'}`,
       ...(decision.rule ? { rule: decision.rule } : {}),
+    });
+  }
+  // reslop's short report is for failures that go back to the implementer; the wizard asks only for checks hooks.
+  if (hook.reduce === true && hook.stage !== 'checks') {
+    problems.push({
+      field: 'reduce',
+      code: 'reduce-stage',
+      message: `hook "${hook.name}": reduce works only for the checks stage; turn it off or move the hook to checks`,
     });
   }
   for (const key of Object.keys(hook.env ?? {})) {
