@@ -9,7 +9,7 @@ import type { AgentDefinition } from '../core/agents.ts';
 import type { AgentEvent } from '../core/events.ts';
 import type { Hook } from '../core/hooks.ts';
 import type { Runner, RunnerId, RunRequest } from '../core/runner.ts';
-import { createSkill, saveHooks } from '../core/workspace.ts';
+import { createSkill, saveHooks, skillHash, warbandDir } from '../core/workspace.ts';
 import { git, gitOk } from './git.ts';
 import { eventLog } from './log.ts';
 import { isInside, worktreePath } from './places.ts';
@@ -517,6 +517,31 @@ test('the event log records the run under its id', async () => {
   const lines = (await readFile(log.path() ?? '', 'utf8')).trim().split('\n').map((l) => JSON.parse(l) as { type: string });
   assert.equal(lines[0]?.type, 'run_started');
   assert.equal(lines.at(-1)?.type, 'run_finished');
+});
+
+test('run_started records the hash of each skill text the prompts were built from', async () => {
+  const root = await setup();
+  const skillPath = join(warbandDir(root), 'skills', 'canon.md');
+  const used = await readFile(skillPath, 'utf8');
+  const { runners, calls } = fakeRunners({
+    implement: async (req) => {
+      // The person edits the skill while the run is going; the run keeps the version it started with.
+      await writeFile(skillPath, `${used}\nA rule added mid-run.\n`);
+      await writeFile(join(req.cwd, 'out.txt'), 'fixed\n');
+      return [result('done')];
+    },
+  });
+  const log = eventLog(root);
+  await runTask({ root, runners, gate: scriptedGate([], []), report: log.write, timeouts: { hook: 30_000 } }, agent, 'Create out.txt saying fixed');
+  const started = (await readFile(log.path() ?? '', 'utf8'))
+    .trim()
+    .split('\n')
+    .map((l) => JSON.parse(l) as EngineEvent)
+    .find((e) => e.type === 'run_started');
+  assert.ok(started?.type === 'run_started');
+  assert.deepEqual(started.skills, [{ name: 'canon', sha256: skillHash(used) }]);
+  // Every prompt, before and after the edit, has the text that was hashed.
+  for (const call of calls) assert.ok(call.req.prompt.includes('House rules') && !call.req.prompt.includes('A rule added mid-run.'), call.stage);
 });
 
 test('structured answers fall back to JSON in the final text', () => {

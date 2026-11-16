@@ -1,3 +1,4 @@
+import { NAME_PATTERN } from './names.ts';
 import { evaluate } from './policy.ts';
 import { runProcess } from './proc.ts';
 
@@ -41,7 +42,7 @@ export interface HookResult {
   output: string[];
 }
 
-export const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+export { NAME_PATTERN } from './names.ts';
 
 /** An environment variable name that every shell and OS takes as is. */
 export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;

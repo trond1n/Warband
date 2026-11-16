@@ -16,7 +16,7 @@ import type { Outcome, RouteOptions, RunState, Stage } from '../core/stages.ts';
 import { which } from '../core/which.ts';
 import { protectedChanges as findProtected } from '../core/protected.ts';
 import type { ProtectedChange } from '../core/protected.ts';
-import { listSkills, loadHooks, loadProtected, warbandDir } from '../core/workspace.ts';
+import { listSkills, loadHooks, loadProtected, skillHash, warbandDir } from '../core/workspace.ts';
 import {
   addWorktree,
   branchExists,
@@ -47,7 +47,21 @@ export type Role = 'planner' | 'implementer' | 'reviewer';
 
 /** Everything the engine reports. A UI only needs to render this stream. */
 export type EngineEvent =
-  | { type: 'run_started'; runId: string; agent: string; task: string; worktree: string; branch: string; base: string }
+  | {
+      type: 'run_started';
+      runId: string;
+      agent: string;
+      task: string;
+      worktree: string;
+      branch: string;
+      base: string;
+      /**
+       * The skills that went into the prompts, with the sha256 of the text
+       * used, so the log shows which version of each file a run followed.
+       * Absent in logs written before it was recorded.
+       */
+      skills?: { name: string; sha256: string }[];
+    }
   | { type: 'warning'; message: string }
   | { type: 'stage'; stage: Stage; reworks: number }
   | { type: 'agent_started'; stage: Stage; role: Role; runner: RunnerId; model?: string; access: Access }
@@ -221,6 +235,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     });
   }
 
+  // Read once: the prompts and the hashes in run_started come from the same text, whatever the file holds later.
   const skillTexts = await Promise.all(skills.filter((s) => agent.skills.includes(s.name)).map(async (s) => ({ name: s.name, text: await readFile(s.path, 'utf8') })));
   const hooks = agent.hooks.map((name) => allHooks.find((h) => h.name === name)).filter((h): h is Hook => h !== undefined);
   const hooksFor = (stage: HookStage): Hook[] => hooks.filter((h) => h.stage === stage);
@@ -244,7 +259,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   await mkdir(dirname(worktree), { recursive: true });
   await excludeLocally(root, ['.warband/runs/']);
   await addWorktree(root, worktree, branch, base);
-  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base });
+  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base, skills: skillTexts.map((s) => ({ name: s.name, sha256: skillHash(s.text) })) });
 
   const ctx: PromptContext = {
     instructions: agent.description,

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -7,6 +8,8 @@ import type { AgentDefinition, Skill } from './agents.ts';
 import { checkHook, HOOK_STAGES } from './hooks.ts';
 import type { Hook, HookProblem, HookStage } from './hooks.ts';
 import { DEFAULT_PROTECTED, DEFAULT_TESTS } from './protected.ts';
+import { checkSkill, composeSkill, splitSkill } from './skills.ts';
+import type { SkillProblem } from './skills.ts';
 import type { ProtectedRules } from './protected.ts';
 import { KNOWN_RUNNER_IDS as RUNNER_IDS } from './runner.ts';
 
@@ -447,4 +450,122 @@ export async function createSkill(root: string, name: string, description: strin
   const body = `---\nname: ${name}\ndescription: ${description.replace(/\r?\n/g, ' ')}\n---\n\n<!-- Write the rules this skill stands for. The whole file is given to the agent. -->\n`;
   await writeFile(path, body, { flag: 'wx' });
   return { name, description, path };
+}
+
+/** A skill with its file text and the hash of that text. */
+export interface SkillFile extends Skill {
+  text: string;
+  /** sha256 of the file text; the same hash goes into run_started of every run that uses the skill. */
+  version: string;
+}
+
+/** sha256 of a skill's text, in hex. */
+export const skillHash = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+/** The skills with their text, as `listSkills` finds them. */
+export async function readSkills(root: string): Promise<SkillFile[]> {
+  return Promise.all(
+    (await listSkills(root)).map(async (skill) => {
+      const text = await readFile(skill.path, 'utf8');
+      return { ...skill, text, version: skillHash(text) };
+    }),
+  );
+}
+
+/** What a person fills in for a skill: the front matter fields and the Markdown body. */
+export interface SkillInput {
+  name: string;
+  description: string;
+  body: string;
+}
+
+/** The skill file changed on disk, or is gone, since the caller read it. */
+export class SkillChangedError extends Error {
+  readonly code = 'changed';
+  constructor(name: string) {
+    super(`skill "${name}" changed on disk since it was read`);
+  }
+}
+
+export class SkillInvalidError extends Error {
+  readonly code = 'invalid';
+  readonly problems: SkillProblem[];
+  constructor(problems: SkillProblem[]) {
+    super(problems.map((p) => p.message).join('; '));
+    this.problems = problems;
+  }
+}
+
+export class SkillInUseError extends Error {
+  readonly code = 'in-use';
+  readonly agents: string[];
+  constructor(name: string, agents: string[]) {
+    super(`skill "${name}" is used by ${agents.map((a) => `/${a}`).join(', ')}`);
+    this.agents = agents;
+  }
+}
+
+/** Names of the agents whose skill list has `name`. */
+export async function skillUsers(root: string, name: string): Promise<string[]> {
+  return (await listAgents(root)).filter((a) => a.skills.includes(name)).map((a) => a.name);
+}
+
+export interface SaveSkillOptions {
+  /** The name the skill had when the form opened; absent for a new skill. */
+  original?: string;
+  /** The skill's `version` when the form opened; a file that changed since is not written over. */
+  expectedVersion?: string;
+  /** The agents the person agreed to update when a used skill is renamed; see `SaveHookOptions`. */
+  renameAgents?: readonly string[];
+}
+
+/**
+ * Creates or updates one skill file. Name and description go into the front
+ * matter in the format `parseFrontMatter` reads; other front matter lines of
+ * an existing file are kept. A renamed skill moves to <new name>.md, and the
+ * agents that list it are updated in the same change.
+ */
+export async function saveSkill(root: string, input: SkillInput, options: SaveSkillOptions = {}): Promise<SkillFile> {
+  const name = normalizeName(input.name);
+  const description = input.description.trim();
+  const problems = checkSkill(name, description);
+  const skills = await readSkills(root);
+  const { original } = options;
+  const current = original === undefined ? undefined : skills.find((s) => s.name === original);
+  if (original !== undefined && !current) throw new SkillChangedError(original);
+  if (current && options.expectedVersion !== undefined && current.version !== options.expectedVersion) throw new SkillChangedError(current.name);
+  const path = current && current.name === name ? current.path : join(skillsDir(root), `${name}.md`);
+  if (name !== original && problems.every((p) => p.field !== 'name')) {
+    if (skills.some((s) => s.name === name || (s.path === path && s !== current))) {
+      problems.unshift({ field: 'name', code: 'name-taken', message: `skill "${name}" already exists` });
+    } else if (existsSync(path) && path !== current?.path) {
+      problems.unshift({ field: 'name', code: 'name-taken', message: `${path} already exists` });
+    }
+  }
+  let references: FileChange[] = [];
+  if (original !== undefined && name !== original && problems.length === 0) {
+    const { agents, changes } = await renamedReferences(root, 'skills', original, name);
+    if (agents.length > 0 && !sameSet(agents, options.renameAgents ?? [])) {
+      problems.unshift({
+        field: 'name',
+        code: 'rename-in-use',
+        agents,
+        message: `skill "${original}" is used by ${agents.map((a) => `/${a}`).join(', ')}; confirm renaming it there too`,
+      });
+    }
+    references = changes;
+  }
+  if (problems.length > 0) throw new SkillInvalidError(problems);
+  const text = composeSkill(name, description, input.body, current ? splitSkill(current.text).extra : []);
+  await commitFiles([{ path, text }, ...(current && current.path !== path ? [{ path: current.path, text: null }] : []), ...references]);
+  return { name, description, path, text, version: skillHash(text) };
+}
+
+/** Removes one skill file. Refused while an agent lists it, or when the file changed since `expectedVersion`. */
+export async function deleteSkill(root: string, name: string, expectedVersion?: string): Promise<void> {
+  const current = (await readSkills(root)).find((s) => s.name === name);
+  if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) throw new SkillChangedError(name);
+  const agents = await skillUsers(root, name);
+  if (agents.length > 0) throw new SkillInUseError(name, agents);
+  await rm(current.path);
 }
