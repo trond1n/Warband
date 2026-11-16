@@ -122,16 +122,22 @@ export function compareReports(a: BenchReport, b: BenchReport): string[] {
   const sb = new Map(summarize(b).map((s) => [s.key, s]));
   const keys = [...new Set([...sa.keys(), ...sb.keys()])];
   const lines = [`A: ${when(a.started)}, /${a.agent.name}`, `B: ${when(b.started)}, /${b.agent.name}`];
+  // A role that a real CLI played in only one report (the other ran only scripted ones for it)
+  // is compared by the agent's definition, not reported as a change of version.
   for (const role of ['implementer', 'reviewer'] as const) {
-    const ra = roleLine(a, role);
-    const rb = roleLine(b, role);
+    const both = a.roles[role] !== undefined && b.roles[role] !== undefined;
+    const ra = both ? roleLine(a, role) : roleLine({ ...a, roles: {} }, role);
+    const rb = both ? roleLine(b, role) : roleLine({ ...b, roles: {} }, role);
     if (ra !== rb) lines.push(`${role}: ${ra} -> ${rb}`);
   }
+  for (const name of a.agent.skills.filter((s) => !b.agent.skills.includes(s))) lines.push(`skill ${name}: removed from the agent`);
+  for (const name of b.agent.skills.filter((s) => !a.agent.skills.includes(s))) lines.push(`skill ${name}: added to the agent`);
+  // Hashes of skills both reports used; a task's own skill appears only in reports that ran that task.
   const hashes = (r: BenchReport): Map<string, string> => new Map(r.runs.flatMap((run) => run.metrics.skills).map((s) => [s.name, s.sha256.slice(0, 8)]));
   const ha = hashes(a);
   const hb = hashes(b);
-  for (const name of [...new Set([...ha.keys(), ...hb.keys()])].sort()) {
-    if (ha.get(name) !== hb.get(name)) lines.push(`skill ${name}: ${ha.get(name) ?? 'absent'} -> ${hb.get(name) ?? 'absent'}`);
+  for (const name of [...ha.keys()].filter((n) => hb.has(n)).sort()) {
+    if (ha.get(name) !== hb.get(name)) lines.push(`skill ${name}: ${ha.get(name)} -> ${hb.get(name)}`);
   }
   if (lines.length === 2) lines.push('Same roles, models, CLI versions and skills.');
   lines.push('');

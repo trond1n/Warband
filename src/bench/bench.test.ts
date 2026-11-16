@@ -371,3 +371,40 @@ test('review-bug really breaks report.js: its tests pass, but the page subtotals
   assert.equal(grand, 1035);
   assert.notEqual(subtotals, grand);
 });
+
+test('a comparison reports changed skills and models, not what one report simply did not run', () => {
+  const skill = (sha256: string) => ({ name: 'house', sha256 });
+  const run = (key: string, skills: { name: string; sha256: string }[], ok: boolean): RunRecord =>
+    ({
+      key,
+      task: key,
+      attempt: 1,
+      verify: { ok, code: ok ? 0 : 1, output: '' },
+      expected: { verify: 'pass', ok, misses: [] },
+      timedOut: false,
+      metrics: { status: 'done', reworks: 0, seconds: 10, stages: {}, modelCalls: 4, scriptedCalls: 0, deniedTools: [], protectedPaths: [], reviews: [], checks: [], skills, roles: {} },
+    }) as RunRecord;
+  const base: BenchReport = {
+    format: 1,
+    agent: { name: 'bencher', roles: agent.roles, skills: ['house'] },
+    roles: { implementer: { runner: 'claude', model: 'sonnet', version: '2.1.325' }, reviewer: { runner: 'claude', model: 'opus', version: '2.1.325' } },
+    started: '2026-11-16T09:00:00.000Z',
+    finished: '2026-11-16T09:10:00.000Z',
+    repeat: 1,
+    tasks: ['fix-bug-test', 'skill-rule'],
+    runs: [run('fix-bug-test', [skill('aaaaaaaa11')], false), run('skill-rule:with-skill', [skill('aaaaaaaa11'), { name: 'changelog', sha256: 'cccccccc' }], true)],
+  };
+  const later: BenchReport = {
+    ...base,
+    roles: { reviewer: { runner: 'claude', model: 'opus', version: '2.1.330' } },
+    tasks: ['fix-bug-test'],
+    runs: [run('fix-bug-test', [skill('bbbbbbbb22')], true)],
+  };
+  const out = compareReports(base, later).join('\n');
+  assert.match(out, /reviewer: claude opus \(CLI 2\.1\.325\) -> claude opus \(CLI 2\.1\.330\)/);
+  assert.doesNotMatch(out, /implementer:/, 'B has no real implementer run; its definition is unchanged');
+  assert.match(out, /skill house: aaaaaaaa -> bbbbbbbb/);
+  assert.doesNotMatch(out, /changelog/, 'a task skill only A ran is not a change');
+  assert.match(out, /fix-bug-test\s+0% -> 100%\s+better/);
+  assert.match(out, /skill-rule:with-skill\s+100% -> -\s+only in A/);
+});
