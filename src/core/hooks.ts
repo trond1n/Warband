@@ -1,4 +1,9 @@
+import { NAME_PATTERN } from './names.ts';
 import { evaluate } from './policy.ts';
+import { join } from 'node:path';
+
+import { keepLogsClean } from './reslop-logs.ts';
+import type { LogCleanup } from './reslop-logs.ts';
 import { runProcess } from './proc.ts';
 
 /**
@@ -39,22 +44,79 @@ export interface HookResult {
   reduced: boolean;
   /** Last lines of combined stdout and stderr. */
   output: string[];
+  /** In a checkout with reduce: what reslop left in .log/ and was taken back. */
+  logs?: LogCleanup;
 }
 
-export const NAME_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
+export { NAME_PATTERN } from './names.ts';
 
-export function validateHook(hook: Hook, workspace: string): string[] {
-  const problems: string[] = [];
-  if (!NAME_PATTERN.test(hook.name)) problems.push(`hook name "${hook.name}" must be lowercase letters, digits and dashes`);
-  if (hook.run.trim() === '') problems.push(`hook "${hook.name}" has no command`);
+/** An environment variable name that every shell and OS takes as is. */
+export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export type HookProblemCode =
+  | 'name-invalid'
+  | 'name-taken'
+  | 'rename-in-use'
+  | 'run-empty'
+  | 'run-denied'
+  | 'stage-unknown'
+  | 'env-name-invalid'
+  | 'env-name-duplicate'
+  | 'reduce-stage';
+
+/**
+ * One reason a hook cannot be saved, with the field it belongs to. `message`
+ * is the English text the wizard prints; the window shows its own text by
+ * `code`.
+ */
+export interface HookProblem {
+  field: 'name' | 'run' | 'stage' | 'env' | 'reduce';
+  code: HookProblemCode;
+  message: string;
+  /** run-denied: the policy rule that denied the command. */
+  rule?: string;
+  /** env-name-*: the variable name. */
+  key?: string;
+  /** rename-in-use: agents that use the hook under its old name and would have their references updated. */
+  agents?: string[];
+}
+
+export function checkHook(hook: Hook, workspace: string): HookProblem[] {
+  const problems: HookProblem[] = [];
+  if (!NAME_PATTERN.test(hook.name)) {
+    problems.push({ field: 'name', code: 'name-invalid', message: `hook name "${hook.name}" must be lowercase letters, digits and dashes` });
+  }
+  if (hook.run.trim() === '') problems.push({ field: 'run', code: 'run-empty', message: `hook "${hook.name}" has no command` });
   if (!(HOOK_STAGES as readonly string[]).includes(hook.stage)) {
-    problems.push(`hook "${hook.name}" has unknown stage "${hook.stage}"`);
+    problems.push({ field: 'stage', code: 'stage-unknown', message: `hook "${hook.name}" has unknown stage "${hook.stage}"` });
   }
   const decision = evaluate({ kind: 'shell', command: hook.run }, { workspace });
   if (decision.effect === 'deny') {
-    problems.push(`hook "${hook.name}" is denied by policy: ${decision.reason ?? decision.rule ?? 'deny'}`);
+    problems.push({
+      field: 'run',
+      code: 'run-denied',
+      message: `hook "${hook.name}" is denied by policy: ${decision.reason ?? decision.rule ?? 'deny'}`,
+      ...(decision.rule ? { rule: decision.rule } : {}),
+    });
+  }
+  // reslop's short report is for failures that go back to the implementer; the wizard asks only for checks hooks.
+  if (hook.reduce === true && hook.stage !== 'checks') {
+    problems.push({
+      field: 'reduce',
+      code: 'reduce-stage',
+      message: `hook "${hook.name}": reduce works only for the checks stage; turn it off or move the hook to checks`,
+    });
+  }
+  for (const key of Object.keys(hook.env ?? {})) {
+    if (!ENV_NAME_PATTERN.test(key)) {
+      problems.push({ field: 'env', code: 'env-name-invalid', key, message: `hook "${hook.name}": environment variable name "${key}" must be letters, digits and _, not starting with a digit` });
+    }
   }
   return problems;
+}
+
+export function validateHook(hook: Hook, workspace: string): string[] {
+  return checkHook(hook, workspace).map((p) => p.message);
 }
 
 const OUTPUT_TAIL = 40;
@@ -79,6 +141,13 @@ export interface HookRunOptions {
    */
   reslop?: string;
   signal?: AbortSignal;
+  /**
+   * The hook runs in the person's own checkout (`warband check`, a trial run
+   * from the window), not in a task worktree. With reduce, what reslop
+   * records in .log/ there is then taken back after the run, see
+   * `keepLogsClean`. In a worktree .log/ is archived with the run instead.
+   */
+  inCheckout?: boolean;
 }
 
 // Colour and cursor codes: the output is read by a model and shown as text.
@@ -88,6 +157,14 @@ const stripAnsi = (line: string): string => line.replace(/\u001b\[[0-9;?]*[A-Za-
 const REDUCED_TAIL = 200;
 
 export async function runHook(hook: Hook, cwd: string, options: HookRunOptions = {}): Promise<HookResult> {
+  if (!options.inCheckout || !(hook.reduce && options.reslop)) return runOnce(hook, cwd, options);
+  // The hard links of what was in .log/ wait in .warband, the one folder of the project Warband writes to.
+  const hold = join(options.warbandDir ?? join(cwd, '.warband'), `.hold-${process.pid}-${Date.now()}`);
+  const { result, cleanup } = await keepLogsClean(cwd, hold, () => runOnce(hook, cwd, options));
+  return { ...result, logs: cleanup };
+}
+
+async function runOnce(hook: Hook, cwd: string, options: HookRunOptions): Promise<HookResult> {
   const output: string[] = [];
   let exitCode: number | null = null;
   let timedOut = false;

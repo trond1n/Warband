@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import type { Hook } from '../core/hooks.ts';
-import { agentWizard, parseAgyModels } from './agent-wizard.ts';
+import { agentWizard } from './agent-wizard.ts';
 import type { Prompter, WizardEnv } from './agent-wizard.ts';
 
 /** Replays answers in order and fails loudly if the wizard asks more than expected. */
@@ -131,8 +131,47 @@ test('without any installed CLI the wizard stops before asking anything', async 
   assert.equal(await agentWizard(io, env({ runners: [] })), null);
 });
 
-test('agy models output is parsed into ids', () => {
-  const output = 'Fetching available models...\ngemini-4-argon-medium\tGemini 4 Argon (Medium)\nclaude-opus-5-5-high\tClaude Opus 5.5 (High)\ngemini-3.8-flash-low\tGemini 3.8 Flash (Low)\n';
-  assert.deepEqual(parseAgyModels(output), ['gemini-4-argon-medium', 'claude-opus-5-5-high', 'gemini-3.8-flash-low']);
-  assert.deepEqual(parseAgyModels('Error: timed out waiting for available models'), []);
+test('the window and the wizard make the same agent file from the same answers', async () => {
+  const { mkdtemp, readFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { saveAgent, saveAgentInput, saveHooks, createSkill } = await import('../core/workspace.ts');
+  const unit: Hook = { name: 'unit', description: '', run: 'npm test', stage: 'checks' };
+  const io = scripted([
+    '/Test', '  Write e2e and unit tests.   ', 'Cover edge cases.', '',
+    '2', '1', '', // skills: canon, then style, in that order
+    '2', '1', '', // hooks: unit, then lint
+    '1', '2', // implementer: claude / sonnet
+    '1', '4', 'claude-opus-5-5', // reviewer: claude / a typed id
+    'y',
+  ]);
+  const skills = [
+    { name: 'style', description: 'Style', path: 'style.md' },
+    { name: 'canon', description: 'Canon', path: 'canon.md' },
+  ];
+  const result = await agentWizard(io, env({ skills, hooks: [lint, unit] }));
+  assert.ok(result);
+  const wizardRoot = await mkdtemp(join(tmpdir(), 'warband-wiz-'));
+  const windowRoot = await mkdtemp(join(tmpdir(), 'warband-win-'));
+  try {
+    const wizardPath = await saveAgent(wizardRoot, result.agent);
+    for (const root of [windowRoot]) {
+      await saveHooks(root, [lint, unit]);
+      await createSkill(root, 'style', 'Style');
+      await createSkill(root, 'canon', 'Canon');
+    }
+    // The same answers as typed into the window's form, blank lines and spaces included.
+    const saved = await saveAgentInput(windowRoot, {
+      name: ' /Test ',
+      description: '\n  Write e2e and unit tests.   \nCover edge cases.\n\n',
+      skills: ['canon', 'style'],
+      hooks: ['unit', 'lint'],
+      implementer: { runner: 'claude', model: 'sonnet' },
+      reviewer: { runner: 'claude', model: ' claude-opus-5-5 ' },
+    });
+    assert.equal(await readFile(saved.path, 'utf8'), await readFile(wizardPath, 'utf8'));
+  } finally {
+    await rm(wizardRoot, { recursive: true, force: true });
+    await rm(windowRoot, { recursive: true, force: true });
+  }
 });

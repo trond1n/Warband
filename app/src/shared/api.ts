@@ -4,12 +4,42 @@
  * preload script. Engine types are imported as types only, so the renderer
  * bundle does not pull in engine code.
  */
-import type { AgentDefinition } from '../../../src/core/agents.ts';
-import type { Hook } from '../../../src/core/hooks.ts';
+import type { AgentDefinition, AgentInput, AgentProblem } from '../../../src/core/agents.ts';
+import type { Hook, HookProblem } from '../../../src/core/hooks.ts';
+import type { HookInput } from '../../../src/core/workspace.ts';
+import type { LogCleanup } from '../../../src/core/reslop-logs.ts';
+import type { SkillProblem } from '../../../src/core/skills.ts';
+import type { SkillInput } from '../../../src/core/workspace.ts';
 import type { EngineEvent, GateDecision } from '../../../src/engine/run.ts';
 import type { Finding } from '../../../src/engine/plan-file.ts';
+import type { ProtectedChange } from '../../../src/core/protected.ts';
+import type { ProviderProblem, ProviderSettings } from '../../../src/core/providers.ts';
+import type { Capabilities, LocalCheck, LoginState, RunnerId, VersionDrift } from '../../../src/core/runner.ts';
+import type { Mismatch, ProbeResult } from '../../../scripts/spike/probes.ts';
 
-export type { AgentDefinition, EngineEvent, Finding, GateDecision, Hook };
+export type {
+  AgentDefinition,
+  AgentInput,
+  AgentProblem,
+  Capabilities,
+  EngineEvent,
+  Finding,
+  GateDecision,
+  Hook,
+  HookInput,
+  HookProblem,
+  SkillInput,
+  SkillProblem,
+  LocalCheck,
+  LoginState,
+  Mismatch,
+  ProbeResult,
+  ProtectedChange,
+  ProviderProblem,
+  ProviderSettings,
+  RunnerId,
+  VersionDrift,
+};
 
 /** An engine event with the time it was reported. */
 export type TimedEvent = EngineEvent & { time: string };
@@ -64,6 +94,193 @@ export interface PlanInfo {
   text: string;
 }
 
+/** The spike probes run from the window on one CLI. */
+export interface ProbeState {
+  running: boolean;
+  total: number;
+  /** Probe running now. */
+  current?: string;
+  results: ProbeResult[];
+  finished?: string;
+  error?: string;
+  /** A full run on a verified CLI: what was remembered on this machine. */
+  check?: LocalCheck;
+  /** Where that run differed from the results the adapter was verified with. */
+  mismatches?: Mismatch[];
+}
+
+/** One agent CLI on this machine, for the "Провайдеры" screen. */
+export interface ProviderInfo {
+  id: RunnerId;
+  name: string;
+  /** The command name looked up on PATH when no path is set, e.g. "agy". */
+  command: string;
+  /** What is launched: the set path, or the name looked up on PATH. */
+  binary: string;
+  /** Saved settings, from providers.json. */
+  settings: ProviderSettings;
+  found: boolean;
+  version?: string;
+  problem?: string;
+  login: LoginState;
+  capabilities: Capabilities;
+  /** Installed version against the one the adapter was verified on. */
+  drift: VersionDrift;
+  probe: ProbeState;
+}
+
+export interface ProvidersView {
+  providers: ProviderInfo[];
+  /** Version of providers.json, passed back on save. */
+  version: string;
+  file: string;
+  /** providers.json could not be read. */
+  error?: string;
+}
+
+export type SaveProviderResult =
+  | { ok: true; version: string }
+  | { ok: false; problems: ProviderProblem[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+/** One hook of the project, with the agents that use it. */
+export interface HookInfo {
+  hook: Hook;
+  /** Agents whose hook list has this hook; absent when the agent files could not be read. */
+  usedBy?: string[];
+}
+
+export interface HooksView {
+  hooks: HookInfo[];
+  /** Version of hooks.json, passed back on save and delete. */
+  version: string;
+  /** The project's .warband folder, which {warband} in a command stands for. */
+  warbandDir: string;
+  /** Path of reslop when it is on PATH. */
+  reslop?: string;
+  /** hooks.json could not be read. */
+  error?: string;
+  /** The agent files could not be read, so "used by" is unknown. */
+  agentsError?: string;
+}
+
+export type SaveHookResult =
+  | { ok: true; version: string; name: string }
+  | { ok: false; problems: HookProblem[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+export type DeleteHookResult =
+  | { ok: true; version: string }
+  | { ok: false; usedBy: string[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+/** A provider as the agent form offers it. */
+export interface ProviderChoice {
+  id: RunnerId;
+  name: string;
+  found: boolean;
+  version?: string;
+  verified: boolean;
+  /** The engine's text when it refuses this CLI as implementer for an unverified adapter. */
+  unverifiedMessage: string;
+  drift: VersionDrift;
+  /** The models kept on the Providers screen; the wizard offers the same. */
+  models: string[];
+}
+
+export interface AgentInfo {
+  agent: AgentDefinition;
+  /** sha256 of the file, passed back on save and delete. */
+  version: string;
+  /** e.g. .warband/agents/dev.json */
+  file: string;
+}
+
+export interface AgentsView {
+  agents: AgentInfo[];
+  skills: { name: string; description: string; size: number }[];
+  hooks: Hook[];
+  providers: ProviderChoice[];
+  /** The agent files could not be read. */
+  error?: string;
+  /** Skills or hooks could not be read. */
+  partsError?: string;
+  /** providers.json could not be read; the model lists are empty. */
+  providersError?: string;
+}
+
+export type SaveAgentResult =
+  | { ok: true; version: string; name: string }
+  | { ok: false; problems: AgentProblem[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+export type DeleteAgentResult = { ok: true } | { ok: false; changed: true } | { ok: false; error: string };
+
+/** One skill of the project as the "Скиллы" screen edits it. */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  /** The Markdown after the front matter. */
+  body: string;
+  /** Front matter lines other than name and description, kept on save. */
+  extra: string[];
+  /** Path relative to the project, e.g. .warband/skills/canon.md. */
+  file: string;
+  /** sha256 of the file text: passed back on save and delete, and the hash run_started records. */
+  version: string;
+  /** Characters that go into a prompt. */
+  size: number;
+  /** Agents whose skill list has this skill; absent when the agent files could not be read. */
+  usedBy?: string[];
+}
+
+export interface SkillsView {
+  skills: SkillInfo[];
+  /** The skills folder could not be read. */
+  error?: string;
+  agentsError?: string;
+}
+
+export type SaveSkillResult =
+  | { ok: true; version: string; name: string }
+  | { ok: false; problems: SkillProblem[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+export type DeleteSkillResult = { ok: true } | { ok: false; usedBy: string[] } | { ok: false; changed: true } | { ok: false; error: string };
+
+/** What a trial run would execute, shown to the person before it runs. */
+export interface TrialRequest {
+  /** The exact command line given to the shell. */
+  command: string;
+  cwd: string;
+  env: Record<string, string>;
+  /** Run through reslop for a short report. */
+  reduced: boolean;
+}
+
+export type TrialResult =
+  | { status: 'invalid'; problems: HookProblem[] }
+  | { status: 'refused'; error: string }
+  | {
+      status: 'finished' | 'cancelled';
+      command: string;
+      cwd: string;
+      ok: boolean;
+      exitCode: number | null;
+      timedOut: boolean;
+      reduced: boolean;
+      seconds: number;
+      /** Last lines of stdout and stderr together. */
+      output: string[];
+      /** With reduce: what reslop left in .log/ of the checkout and was taken back. */
+      logs?: LogCleanup;
+    };
+
 export interface AppState {
   projects: string[];
   current?: string;
@@ -87,6 +304,42 @@ export interface WarbandApi {
   openReslop(root: string, runId: string): Promise<{ ok: boolean; message?: string }>;
   merge(root: string, branch: string): Promise<{ ok: boolean; output: string }>;
   openPath(path: string): Promise<void>;
+  providers(): Promise<ProvidersView>;
+  saveProvider(id: RunnerId, settings: ProviderSettings, version: string): Promise<SaveProviderResult>;
+  /** Runs the spike probes on one CLI. Resolves when they end; progress comes through onProbe. */
+  probe(id: RunnerId): Promise<ProbeState>;
+  cancelProbe(): Promise<void>;
+  /** A section of docs/runners.md: claude, codex, antigravity, kimi, glm or adding. */
+  runnerDocs(section: string): Promise<string>;
+  onProbe(listener: (id: RunnerId, state: ProbeState) => void): () => void;
+  /** providers.json changed on disk. */
+  onProvidersChanged(listener: () => void): () => void;
+  hooks(root: string): Promise<HooksView>;
+  /**
+   * `original`: the name the hook had when the form opened; null for a new hook.
+   * `renameAgents`: the agents the person agreed to update when a used hook is renamed.
+   */
+  saveHook(root: string, input: HookInput, original: string | null, version: string, renameAgents?: string[]): Promise<SaveHookResult>;
+  deleteHook(root: string, name: string, version: string): Promise<DeleteHookResult>;
+  /** The exact command line, folder and variables a trial run of the form would use, or why it cannot run. */
+  trialRequest(root: string, input: HookInput): Promise<TrialRequest | { problems: HookProblem[] }>;
+  /** Runs the hook as the form has it in the project checkout; `confirmed` is the command the person accepted. */
+  trialHook(root: string, input: HookInput, confirmed: string): Promise<TrialResult>;
+  cancelTrial(): Promise<void>;
+  agents(root: string): Promise<AgentsView>;
+  /** `original`: the agent's name when the form opened, null for a new one; `version`: its version then. */
+  saveAgent(root: string, input: AgentInput, original: string | null, version: string): Promise<SaveAgentResult>;
+  deleteAgent(root: string, name: string, version: string): Promise<DeleteAgentResult>;
+  skills(root: string): Promise<SkillsView>;
+  /**
+   * `original`: the name the skill had when the form opened; null for a new one.
+   * `version`: the skill's version when the form opened (ignored for a new one).
+   * `renameAgents`: the agents the person agreed to update when a used skill is renamed.
+   */
+  saveSkill(root: string, input: SkillInput, original: string | null, version: string, renameAgents?: string[]): Promise<SaveSkillResult>;
+  deleteSkill(root: string, name: string, version: string): Promise<DeleteSkillResult>;
+  /** Something in the project's .warband changed on disk (hooks.json, agents, skills). */
+  onWorkspaceChanged(listener: (root: string) => void): () => void;
   /** Live events of every active run. Returns an unsubscribe function. */
   onEvent(listener: (runId: string, event: TimedEvent) => void): () => void;
 }

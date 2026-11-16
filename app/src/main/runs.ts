@@ -39,9 +39,16 @@ export interface RunManagerOptions {
 export class RunManager {
   readonly #options: RunManagerOptions;
   readonly #active = new Map<string, Active>();
+  #runners: Readonly<Record<RunnerId, Runner>>;
 
   constructor(options: RunManagerOptions) {
     this.#options = options;
+    this.#runners = options.runners;
+  }
+
+  /** Runners for runs started from now on, after the machine settings changed. Running ones keep theirs. */
+  useRunners(runners: Readonly<Record<RunnerId, Runner>>): void {
+    this.#runners = runners;
   }
 
   async project(root: string): Promise<ProjectInfo> {
@@ -108,7 +115,7 @@ export class RunManager {
     runTask(
       {
         root,
-        runners: this.#options.runners,
+        runners: this.#runners,
         gate,
         report,
         signal: controller.signal,

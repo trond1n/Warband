@@ -1,4 +1,4 @@
-import type { Finding, RunStatus, TimedEvent } from '../shared/api.ts';
+import type { Finding, ProtectedChange, RunStatus, TimedEvent } from '../shared/api.ts';
 
 /* What the window shows, worked out from a run's events. No DOM here. */
 
@@ -30,7 +30,14 @@ export const GATE_STAGES = new Set(['approve', 'accept']);
 export type OpenGate =
   | { stage: 'clarify'; questions: string[] }
   | { stage: 'approve'; plan: string }
-  | { stage: 'accept'; findings: readonly Finding[]; summary: string; reviewComments: readonly string[]; branch: string };
+  | {
+      stage: 'accept';
+      findings: readonly Finding[];
+      summary: string;
+      reviewComments: readonly string[];
+      branch: string;
+      protectedChanges: readonly ProtectedChange[];
+    };
 
 /** The gate waiting for an answer: opened and not yet answered or moved past. */
 export function openGate(events: readonly TimedEvent[]): OpenGate | undefined {
@@ -48,6 +55,8 @@ export function openGate(events: readonly TimedEvent[]): OpenGate | undefined {
         summary: e.result.summary,
         reviewComments: e.result.reviewComments,
         branch: e.result.branch,
+        // Older logs have no protectedChanges.
+        protectedChanges: e.result.protectedChanges ?? [],
       };
     }
   }
@@ -131,6 +140,18 @@ export function dayLabel(iso: string, today = new Date()): string {
 }
 
 export const clock = (iso: string): string => new Date(iso).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+const PROTECTED_REASON: Record<ProtectedChange['reason'], string> = {
+  protected: 'защищённый файл',
+  test_deleted: 'тест удалён',
+  test_renamed: 'тест переименован',
+};
+
+/** One protected change as a line for the window. */
+export function protectedLine(c: ProtectedChange): string {
+  const name = c.from ? `${c.from} → ${c.path}` : c.path;
+  return c.reason === 'protected' ? `${name}: ${PROTECTED_REASON[c.reason]} (${c.pattern})` : `${name}: ${PROTECTED_REASON[c.reason]}`;
+}
 
 /** `path:line` of a finding, when it names one. */
 export function findingTarget(where: string | undefined): { path: string; line?: number } | undefined {

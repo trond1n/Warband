@@ -14,7 +14,7 @@
     "warband": "node src/cli.ts",
     "doctor": "node src/cli.ts doctor",
     "spike": "node scripts/spike/probe.ts",
-    "test": "node --test \"src/**/*.test.ts\" \"app/src/**/*.test.ts\"",
+    "test": "node --test \"src/**/*.test.ts\" \"scripts/**/*.test.ts\" \"app/src/**/*.test.ts\"",
     "typecheck": "tsc && tsc -p app/tsconfig.json",
     "postinstall": "node scripts/link.ts",
     "ui": "node src/cli.ts ui"

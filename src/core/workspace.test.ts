@@ -5,18 +5,37 @@ import { join } from 'node:path';
 import { after, test } from 'node:test';
 
 import { normalizeName, validateAgent } from './agents.ts';
+import { validateHook } from './hooks.ts';
 import type { AgentDefinition } from './agents.ts';
 import {
+  commitFiles,
   createSkill,
+  deleteHook,
+  deleteSkill,
+  readSkills,
+  saveSkill,
+  SkillChangedError,
+  SkillInUseError,
+  SkillInvalidError,
+  skillHash,
+  skillUsers,
+  HookInUseError,
+  HookInvalidError,
+  HooksChangedError,
+  hookFromInput,
+  hookUsers,
   listAgents,
   listSkills,
   loadAgent,
   loadHooks,
   parseFrontMatter,
+  readHooks,
   saveAgent,
+  saveHook,
   saveHooks,
   warbandDir,
 } from './workspace.ts';
+import type { HookInput, HooksSnapshot } from './workspace.ts';
 
 const roots: string[] = [];
 const project = async (): Promise<string> => {
@@ -92,4 +111,347 @@ test('agent validation names every missing part', () => {
 test('front matter parsing tolerates CRLF and missing fields', () => {
   assert.deepEqual(parseFrontMatter('---\r\nname: a\r\ndescription: b c\r\n---\r\nbody'), { name: 'a', description: 'b c' });
   assert.deepEqual(parseFrontMatter('no front matter'), {});
+});
+
+/* Hooks edited one at a time, as the window does. */
+
+const input = (fields: Partial<HookInput> = {}): HookInput => ({
+  name: 'unit',
+  description: '',
+  run: 'npm test',
+  stage: 'checks',
+  env: [],
+  reduce: false,
+  ...fields,
+});
+
+test('a hook saved from a form is written exactly as the wizard writes it', async () => {
+  const root = await project();
+  const saved = await saveHook(root, input({ name: ' /Unit ', run: ' npm test ', reduce: true }), { expectedVersion: 'none' });
+  // What `warband agent new` does for the same answers: saveHooks(root, [...loadHooks(root), newHook]).
+  const wizardRoot = await project();
+  await saveHooks(wizardRoot, [{ name: 'unit', description: '', run: 'npm test', stage: 'checks', reduce: true }]);
+  assert.equal(
+    await readFile(join(warbandDir(root), 'hooks.json'), 'utf8'),
+    await readFile(join(warbandDir(wizardRoot), 'hooks.json'), 'utf8'),
+  );
+  assert.deepEqual(saved.hook, { name: 'unit', description: '', run: 'npm test', stage: 'checks', reduce: true });
+  assert.notEqual(saved.version, 'none');
+});
+
+test('environment rows: blank ones are dropped, a repeated name is a problem, no rows means no env', () => {
+  assert.deepEqual(hookFromInput(input({ env: [['', ''], [' NX_DAEMON ', 'false']] }), '/w').hook.env, { NX_DAEMON: 'false' });
+  assert.ok(!('env' in hookFromInput(input({ env: [['', '  ']] }), '/w').hook));
+  assert.deepEqual(
+    hookFromInput(input({ env: [['A', '1'], ['A', '2'], ['A', '3'], ['1X', 'y']] }), '/w').problems.map((p) => [p.code, p.key]),
+    [
+      ['env-name-invalid', '1X'],
+      ['env-name-duplicate', 'A'],
+    ],
+  );
+  assert.deepEqual(hookFromInput(input({ env: [['', 'value']] }), '/w').problems.map((p) => p.code), ['env-name-invalid']);
+});
+
+test('a hook the policy denies, or with a bad name, is not saved; the problems name their fields', async () => {
+  const root = await project();
+  await assert.rejects(
+    saveHook(root, input({ name: 'Bad Name', run: 'rm -rf build' })),
+    (err: unknown) => {
+      assert.ok(err instanceof HookInvalidError);
+      assert.deepEqual(
+        err.problems.map((p) => [p.field, p.code, p.rule]),
+        [
+          ['name', 'name-invalid', undefined],
+          ['run', 'run-denied', 'shell.rm-recursive-force'],
+        ],
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(await readHooks(root), { hooks: [], version: 'none' });
+});
+
+test('edit in place keeps the order; a taken name and a stale file are refused', async () => {
+  const root = await project();
+  let snap = await saveHook(root, input({ name: 'lint', run: 'npm run lint' }));
+  snap = await saveHook(root, input({ name: 'unit' }), { expectedVersion: snap.version });
+  snap = await saveHook(root, input({ name: 'lint', run: 'npm run lint -- --fix', stage: 'finish' }), { original: 'lint', expectedVersion: snap.version });
+  assert.deepEqual(snap.hooks.map((h) => [h.name, h.run, h.stage]), [
+    ['lint', 'npm run lint -- --fix', 'finish'],
+    ['unit', 'npm test', 'checks'],
+  ]);
+
+  await assert.rejects(saveHook(root, input({ name: 'unit' }), { original: 'lint', expectedVersion: snap.version }), (err: unknown) => {
+    assert.ok(err instanceof HookInvalidError);
+    assert.equal(err.problems[0]?.code, 'name-taken');
+    return true;
+  });
+  await assert.rejects(saveHook(root, input({ name: 'new' }), { expectedVersion: 'stale' }), HooksChangedError);
+  await assert.rejects(saveHook(root, input({ name: 'gone' }), { original: 'gone', expectedVersion: snap.version }), HooksChangedError);
+
+  // A rename of a hook no agent uses is fine.
+  snap = await saveHook(root, input({ name: 'style', run: 'npm run lint' }), { original: 'lint', expectedVersion: snap.version });
+  assert.deepEqual(snap.hooks.map((h) => h.name), ['style', 'unit']);
+});
+
+test('a hook that agents use is not deleted, nor renamed without confirming its agents; others are', async () => {
+  const root = await project();
+  let snap: HooksSnapshot = await saveHook(root, input({ name: 'unit' }));
+  snap = await saveHook(root, input({ name: 'spare', run: 'echo hi' }), { expectedVersion: snap.version });
+  await saveAgent(root, agent);
+  await saveAgent(root, { ...agent, name: 'dev' });
+  assert.deepEqual(await hookUsers(root, 'unit'), ['dev', 'test']);
+  assert.deepEqual(await hookUsers(root, 'spare'), []);
+
+  await assert.rejects(saveHook(root, input({ name: 'tests' }), { original: 'unit', expectedVersion: snap.version }), (err: unknown) => {
+    assert.ok(err instanceof HookInvalidError);
+    assert.deepEqual(err.problems.map((p) => [p.code, p.agents]), [['rename-in-use', ['dev', 'test']]]);
+    return true;
+  });
+  await assert.rejects(deleteHook(root, 'unit', snap.version), (err: unknown) => {
+    assert.ok(err instanceof HookInUseError);
+    assert.deepEqual(err.agents, ['dev', 'test']);
+    return true;
+  });
+  await assert.rejects(deleteHook(root, 'spare', 'stale'), HooksChangedError);
+  snap = await deleteHook(root, 'spare', snap.version);
+  assert.deepEqual(snap.hooks.map((h) => h.name), ['unit']);
+  // A hook that is gone already is reported as a change on disk.
+  await assert.rejects(deleteHook(root, 'spare', snap.version), HooksChangedError);
+});
+
+test('renaming a used hook updates every agent that lists it, in one change', async () => {
+  const root = await project();
+  let snap: HooksSnapshot = await saveHook(root, input({ name: 'unit' }));
+  snap = await saveHook(root, input({ name: 'lint', run: 'npm run lint' }), { expectedVersion: snap.version });
+  await saveAgent(root, { ...agent, hooks: ['lint', 'unit'] });
+  await saveAgent(root, { ...agent, name: 'dev', hooks: ['unit'] });
+  await saveAgent(root, { ...agent, name: 'docs', hooks: ['lint'] });
+  // A key Warband does not know, kept by hand in an agent file, survives the rename.
+  const testFile = join(warbandDir(root), 'agents', 'test.json');
+  const withNote = JSON.parse(await readFile(testFile, 'utf8')) as Record<string, unknown>;
+  await writeFile(testFile, `${JSON.stringify({ ...withNote, note: 'kept' }, null, 2)}\n`);
+  const docsBefore = await readFile(join(warbandDir(root), 'agents', 'docs.json'), 'utf8');
+
+  // The list confirmed in the window no longer matches: nothing is written, the problem has the agents of now.
+  await assert.rejects(saveHook(root, input({ name: 'tests' }), { original: 'unit', expectedVersion: snap.version, renameAgents: ['test'] }), (err: unknown) => {
+    assert.ok(err instanceof HookInvalidError);
+    assert.deepEqual(err.problems.map((p) => [p.code, p.agents]), [['rename-in-use', ['dev', 'test']]]);
+    return true;
+  });
+  assert.deepEqual((await listAgents(root)).map((a) => [a.name, a.hooks]), [
+    ['dev', ['unit']],
+    ['docs', ['lint']],
+    ['test', ['lint', 'unit']],
+  ]);
+
+  snap = await saveHook(root, input({ name: 'tests' }), { original: 'unit', expectedVersion: snap.version, renameAgents: ['test', 'dev'] });
+  assert.deepEqual(snap.hooks.map((h) => h.name), ['tests', 'lint']);
+  assert.deepEqual((await listAgents(root)).map((a) => [a.name, a.hooks]), [
+    ['dev', ['tests']],
+    ['docs', ['lint']],
+    ['test', ['lint', 'tests']],
+  ]);
+  assert.equal((JSON.parse(await readFile(testFile, 'utf8')) as Record<string, unknown>)['note'], 'kept');
+  assert.equal(await readFile(join(warbandDir(root), 'agents', 'docs.json'), 'utf8'), docsBefore);
+  // An agent made by the wizard and renamed here is byte for byte what the wizard writes for those hooks.
+  const dev = await loadAgent(root, 'dev');
+  assert.equal(await readFile(join(warbandDir(root), 'agents', 'dev.json'), 'utf8'), `${JSON.stringify(dev, null, 2)}\n`);
+  assert.deepEqual(validateAgent(dev!, { skills: dev!.skills.map((name) => ({ name })), hooks: snap.hooks }), []);
+});
+
+test('commitFiles puts every file back when one of the writes fails', async () => {
+  const root = await project();
+  const a = join(root, 'a.txt');
+  const gone = join(root, 'gone.txt');
+  const blocked = join(root, 'blocked');
+  await writeFile(a, 'old a');
+  await writeFile(gone, 'old gone');
+  await mkdir(blocked);
+  await writeFile(join(blocked, 'inside.txt'), 'x');
+  await assert.rejects(
+    commitFiles([
+      { path: a, text: 'new a' },
+      { path: join(root, 'fresh.txt'), text: 'fresh' },
+      { path: gone, text: null },
+      // A folder where a file should go: this swap fails, after the others were made.
+      { path: blocked, text: 'cannot' },
+    ]),
+  );
+  assert.equal(await readFile(a, 'utf8'), 'old a');
+  assert.equal(await readFile(gone, 'utf8'), 'old gone');
+  const { readdir } = await import('node:fs/promises');
+  assert.deepEqual((await readdir(root)).sort(), ['a.txt', 'blocked', 'gone.txt']);
+
+  await commitFiles([
+    { path: a, text: 'new a' },
+    { path: gone, text: null },
+  ]);
+  assert.deepEqual((await readdir(root)).sort(), ['a.txt', 'blocked']);
+  assert.equal(await readFile(a, 'utf8'), 'new a');
+});
+
+test('reduce on a hook outside the checks stage is a problem at the reduce field, in the core and for the wizard', async () => {
+  const root = await project();
+  const { problems } = hookFromInput(input({ stage: 'finish', reduce: true }), root);
+  assert.deepEqual(
+    problems.map((p) => [p.field, p.code]),
+    [['reduce', 'reduce-stage']],
+  );
+  assert.deepEqual(validateHook({ name: 'unit', description: '', run: 'npm test', stage: 'setup', reduce: true }, root), [
+    'hook "unit": reduce works only for the checks stage; turn it off or move the hook to checks',
+  ]);
+  assert.deepEqual(hookFromInput(input({ stage: 'checks', reduce: true }), root).problems, []);
+  // Not saved, and not dropped either: the person decides.
+  await assert.rejects(saveHook(root, input({ stage: 'finish', reduce: true })), HookInvalidError);
+  assert.deepEqual(await readHooks(root), { hooks: [], version: 'none' });
+});
+
+test('hooks.json that is not JSON is an error with its path', async () => {
+  const root = await project();
+  await mkdir(warbandDir(root), { recursive: true });
+  await writeFile(join(warbandDir(root), 'hooks.json'), '{ nope');
+  await assert.rejects(readHooks(root), /hooks\.json is not valid JSON/);
+  await assert.rejects(saveHook(root, input()), /not valid JSON/);
+});
+
+const skillInput = (fields: Partial<{ name: string; description: string; body: string }> = {}) => ({ name: 'canon', description: 'How we write code', body: '# Rules\n\n- small functions\n', ...fields });
+
+test('a skill saved from the window is the file the wizard writes, and the wizard and engine read it', async () => {
+  const root = await project();
+  const body = '<!-- Write the rules this skill stands for. The whole file is given to the agent. -->\n';
+  const saved = await saveSkill(root, skillInput({ name: ' /Canon ', body }));
+  const wizardRoot = await project();
+  const made = await createSkill(wizardRoot, 'canon', 'How we write code');
+  assert.equal(saved.text, await readFile(made.path, 'utf8'));
+  assert.equal(await readFile(saved.path, 'utf8'), saved.text);
+  assert.equal(saved.path, join(warbandDir(root), 'skills', 'canon.md'));
+  // listSkills is what the wizard offers and what the engine checks agents against.
+  assert.deepEqual(await listSkills(root), [{ name: 'canon', description: 'How we write code', path: saved.path }]);
+  const [read] = await readSkills(root);
+  assert.equal(read?.version, skillHash(saved.text));
+  assert.equal(saved.version, read?.version);
+});
+
+test('editing a skill keeps its other front matter; a stale file, a taken name and bad fields are refused', async () => {
+  const root = await project();
+  await mkdir(join(warbandDir(root), 'skills'), { recursive: true });
+  const path = join(warbandDir(root), 'skills', 'canon.md');
+  await writeFile(path, '---\nname: canon\ntags: go\ndescription: old\n---\n\nold rules\n');
+  await saveSkill(root, skillInput({ name: 'style', description: 'Style' }));
+  const [canon] = await readSkills(root);
+  const saved = await saveSkill(root, skillInput({ description: 'new' }), { original: 'canon', expectedVersion: canon!.version });
+  assert.equal(saved.text, '---\nname: canon\ndescription: new\ntags: go\n---\n\n# Rules\n\n- small functions\n');
+
+  await assert.rejects(saveSkill(root, skillInput(), { original: 'canon', expectedVersion: canon!.version }), SkillChangedError);
+  await assert.rejects(saveSkill(root, skillInput(), { original: 'gone' }), SkillChangedError);
+  await assert.rejects(saveSkill(root, skillInput({ name: 'style' }), { original: 'canon', expectedVersion: saved.version }), (err: unknown) => {
+    assert.ok(err instanceof SkillInvalidError);
+    assert.deepEqual(err.problems.map((p) => p.code), ['name-taken']);
+    return true;
+  });
+  await assert.rejects(saveSkill(root, skillInput({ name: 'canon' })), (err: unknown) => err instanceof SkillInvalidError && err.problems[0]?.code === 'name-taken');
+  await assert.rejects(saveSkill(root, skillInput({ name: 'Bad Name', description: 'a\nb' })), (err: unknown) => {
+    assert.ok(err instanceof SkillInvalidError);
+    assert.deepEqual(err.problems.map((p) => [p.field, p.code]), [
+      ['name', 'name-invalid'],
+      ['description', 'description-multiline'],
+    ]);
+    return true;
+  });
+  assert.equal(await readFile(path, 'utf8'), saved.text);
+});
+
+test('renaming a used skill moves the file and updates the agents in one change; a used skill is not deleted', async () => {
+  const root = await project();
+  const canon = await saveSkill(root, skillInput());
+  await saveSkill(root, skillInput({ name: 'spare', description: 'Spare' }));
+  await saveAgent(root, { ...agent, skills: ['canon'], hooks: [] });
+  await saveAgent(root, { ...agent, name: 'dev', skills: ['spare', 'canon'], hooks: [] });
+  await saveAgent(root, { ...agent, name: 'docs', skills: ['spare'], hooks: [] });
+  assert.deepEqual(await skillUsers(root, 'canon'), ['dev', 'test']);
+
+  await assert.rejects(saveSkill(root, skillInput({ name: 'code-canon' }), { original: 'canon', expectedVersion: canon.version }), (err: unknown) => {
+    assert.ok(err instanceof SkillInvalidError);
+    assert.deepEqual(err.problems.map((p) => [p.code, p.agents]), [['rename-in-use', ['dev', 'test']]]);
+    return true;
+  });
+  const renamed = await saveSkill(root, skillInput({ name: 'code-canon' }), { original: 'canon', expectedVersion: canon.version, renameAgents: ['dev', 'test'] });
+  assert.equal(renamed.path, join(warbandDir(root), 'skills', 'code-canon.md'));
+  assert.deepEqual((await listSkills(root)).map((s) => s.name), ['code-canon', 'spare']);
+  assert.deepEqual((await listAgents(root)).map((a) => [a.name, a.skills]), [
+    ['dev', ['spare', 'code-canon']],
+    ['docs', ['spare']],
+    ['test', ['code-canon']],
+  ]);
+  for (const a of await listAgents(root)) assert.deepEqual(validateAgent(a, { skills: await listSkills(root), hooks: [] }), [], a.name);
+
+  await assert.rejects(deleteSkill(root, 'code-canon', renamed.version), (err: unknown) => err instanceof SkillInUseError && err.agents.join() === 'dev,test');
+  await saveAgent(root, { ...agent, name: 'docs', skills: [], hooks: [] });
+  await saveAgent(root, { ...agent, name: 'dev', skills: ['code-canon'], hooks: [] });
+  const spare = (await readSkills(root)).find((s) => s.name === 'spare')!;
+  await assert.rejects(deleteSkill(root, 'spare', 'stale'), SkillChangedError);
+  await deleteSkill(root, 'spare', spare.version);
+  assert.deepEqual((await listSkills(root)).map((s) => s.name), ['code-canon']);
+});
+
+test('a rename changes only the name in a hand-formatted agent file', async () => {
+  const root = await project();
+  await saveSkill(root, skillInput({ name: 'teamer-canon' }));
+  await saveSkill(root, skillInput({ name: 'teamer-dev' }));
+  await mkdir(join(warbandDir(root), 'agents'), { recursive: true });
+  const file = join(warbandDir(root), 'agents', 'dev.json');
+  const layout = (canon: string): string =>
+    [
+      '{',
+      '  "name": "dev",',
+      '  "description": "Writes code; \\"teamer-canon\\" in the text is not a reference",',
+      `  "skills": ["${canon}", "teamer-dev"],`,
+      '  "hooks": ["teamer-canon-check"],',
+      '  "roles": {',
+      '    "implementer": { "runner": "claude", "model": "sonnet" },',
+      '    "reviewer": { "runner": "claude", "model": "opus" }',
+      '  }',
+      '}',
+      '',
+    ].join('\r\n');
+  await writeFile(file, layout('teamer-canon'));
+  const [canon] = await readSkills(root);
+  await saveSkill(root, skillInput({ name: 'canon' }), { original: 'teamer-canon', expectedVersion: canon!.version, renameAgents: ['dev'] });
+  assert.equal(await readFile(file, 'utf8'), layout('canon'));
+});
+
+test('agents from the form: problems by field, a stale file, rename and delete leave run logs alone', async () => {
+  const { saveAgentInput, deleteAgent, readAgents, AgentChangedError, AgentInvalidError } = await import('./workspace.ts');
+  const root = await project();
+  await saveHooks(root, [{ name: 'unit', description: '', run: 'npm test', stage: 'checks' }]);
+  await createSkill(root, 'canon', 'rules');
+  const form = { name: 'dev', description: 'Writes code', skills: ['canon'], hooks: ['unit'], implementer: { runner: 'claude', model: 'sonnet' }, reviewer: { runner: 'claude', model: 'opus' } };
+
+  await assert.rejects(saveAgentInput(root, { ...form, name: 'Dev Ops', description: ' ', skills: ['gone'], reviewer: { runner: 'claude', model: '' } }), (err: unknown) => {
+    assert.ok(err instanceof AgentInvalidError);
+    assert.deepEqual(err.problems.map((p) => [p.field, p.code, p.item]), [
+      ['name', 'name-invalid', undefined],
+      ['description', 'description-empty', undefined],
+      ['skills', 'skill-unknown', 'gone'],
+      ['reviewer', 'same-cli-no-model', undefined],
+    ]);
+    return true;
+  });
+  const saved = await saveAgentInput(root, form);
+  await assert.rejects(saveAgentInput(root, form), (err: unknown) => err instanceof AgentInvalidError && err.problems[0]?.code === 'name-taken');
+  await assert.rejects(saveAgentInput(root, { ...form, description: 'x' }, { original: 'dev', expectedVersion: 'stale' }), AgentChangedError);
+
+  // A past run of /dev: its log lives under its run id and is not the agent's to change.
+  const log = join(warbandDir(root), 'runs', 'dev-20261116-0900', 'events.jsonl');
+  await mkdir(join(log, '..'), { recursive: true });
+  await writeFile(log, '{"type":"run_started","agent":"dev"}\n');
+
+  const renamed = await saveAgentInput(root, { ...form, name: 'developer' }, { original: 'dev', expectedVersion: saved.version });
+  assert.deepEqual((await readAgents(root)).map((a) => [a.agent.name, a.path]), [['developer', renamed.path]]);
+  assert.equal(await loadAgent(root, 'dev'), undefined);
+  await assert.rejects(deleteAgent(root, 'developer', 'stale'), AgentChangedError);
+  await deleteAgent(root, 'developer', renamed.version);
+  assert.deepEqual(await listAgents(root), []);
+  assert.equal(await readFile(log, 'utf8'), '{"type":"run_started","agent":"dev"}\n');
 });

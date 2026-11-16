@@ -1,5 +1,6 @@
-import { cp, readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { cp, mkdir, readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import { validateAgent } from '../core/agents.ts';
 import type { AgentDefinition } from '../core/agents.ts';
@@ -8,14 +9,18 @@ import type { AgentEvent } from '../core/events.ts';
 import { runHook } from '../core/hooks.ts';
 import type { Hook, HookResult, HookStage } from '../core/hooks.ts';
 import type { RoleAssignment } from '../core/roles.ts';
+import { driftMessage, unverifiedImplementerMessage, versionDrift } from '../core/runner.ts';
 import type { Access, Runner, RunnerId } from '../core/runner.ts';
 import { advance, DEFAULT_ROUTE, initialState } from '../core/stages.ts';
 import type { Outcome, RouteOptions, RunState, Stage } from '../core/stages.ts';
 import { which } from '../core/which.ts';
-import { listSkills, loadHooks, warbandDir } from '../core/workspace.ts';
+import { protectedChanges as findProtected } from '../core/protected.ts';
+import type { ProtectedChange } from '../core/protected.ts';
+import { listSkills, loadHooks, loadProtected, skillHash, warbandDir } from '../core/workspace.ts';
 import {
   addWorktree,
   branchExists,
+  changedFiles,
   commitAll,
   excludeLocally,
   headCommit,
@@ -25,6 +30,7 @@ import {
   uncommitted,
   UNSTAGED_DIRS,
 } from './git.ts';
+import { worktreePath, worktreesHome } from './places.ts';
 import { findingLine, pendingPlans, planFeedback as plansFeedback, readPlans, renderPlan, writePlan } from './plan-file.ts';
 import type { Finding } from './plan-file.ts';
 import {
@@ -35,13 +41,27 @@ import {
   planPrompt,
   reviewPrompt,
 } from './prompts.ts';
-import type { PromptContext } from './prompts.ts';
+import type { Feedback, PromptContext } from './prompts.ts';
 
 export type Role = 'planner' | 'implementer' | 'reviewer';
 
 /** Everything the engine reports. A UI only needs to render this stream. */
 export type EngineEvent =
-  | { type: 'run_started'; runId: string; agent: string; task: string; worktree: string; branch: string; base: string }
+  | {
+      type: 'run_started';
+      runId: string;
+      agent: string;
+      task: string;
+      worktree: string;
+      branch: string;
+      base: string;
+      /**
+       * The skills that went into the prompts, with the sha256 of the text
+       * used, so the log shows which version of each file a run followed.
+       * Absent in logs written before it was recorded.
+       */
+      skills?: { name: string; sha256: string }[];
+    }
   | { type: 'warning'; message: string }
   | { type: 'stage'; stage: Stage; reworks: number }
   | { type: 'agent_started'; stage: Stage; role: Role; runner: RunnerId; model?: string; access: Access }
@@ -54,6 +74,8 @@ export type EngineEvent =
   | { type: 'gate_open'; stage: 'accept'; result: AcceptRequest }
   | { type: 'gate'; stage: Stage; outcome: Outcome; comment?: string }
   | { type: 'review'; verdict: 'approve' | 'changes_requested'; findings: Finding[] }
+  /** After each implement: changed files that are protected, or tests deleted or renamed. Empty when there are none. */
+  | { type: 'protected_changes'; changes: ProtectedChange[] }
   /** A review plan in .plan/ of the worktree (reslop format), from the reviewer or the person. */
   | { type: 'plan_written'; stage: Stage; name: string; source: 'reviewer' | 'person'; findings: number }
   | { type: 'run_finished'; state: RunState; branch?: string; commit?: string; worktree?: string; archive?: string };
@@ -70,6 +92,8 @@ export interface AcceptRequest {
   diffStat: readonly string[];
   reviewComments: readonly string[];
   findings: readonly Finding[];
+  /** Protected files changed by the run, found without a model. */
+  protectedChanges: readonly ProtectedChange[];
   worktree: string;
   base: string;
   branch: string;
@@ -92,6 +116,8 @@ export interface EngineOptions {
   timeouts?: Partial<Record<'agent' | 'hook', number>>;
   /** Lets a runner whose adapter is unverified edit files. Off by default. */
   allowUnverified?: boolean;
+  /** The folder for run worktrees. Defaults to worktreesHome(); never inside the project. */
+  worktrees?: string;
   now?: () => Date;
   /** Stops the run: running agents and hooks are killed, and the run halts as cancelled. */
   signal?: AbortSignal;
@@ -169,7 +195,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   const base = await headCommit(root);
   if (!base) throw new Error('the repository has no commits yet; commit something first');
 
-  const [skills, allHooks] = await Promise.all([listSkills(options.root), loadHooks(options.root)]);
+  const [skills, allHooks, protectedRules] = await Promise.all([listSkills(options.root), loadHooks(options.root), loadProtected(options.root)]);
   const problems = validateAgent(agent, { skills, hooks: allHooks });
   if (problems.length > 0) throw new Error(`agent /${agent.name} is not valid:\n  ${problems.join('\n  ')}`);
 
@@ -178,16 +204,21 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     implementer: agent.roles.implementer,
     reviewer: agent.roles.reviewer,
   };
+  const driftReported = new Set<RunnerId>();
   for (const role of ['planner', 'implementer', 'reviewer'] as const) {
     const runner = runners[roles[role].runner];
     const detection = await runner.detect();
     if (!detection.found) throw new Error(`${runner.displayName} (${role}) is not installed`);
+    // A CLI that updated itself since its adapter was verified is reported once, not blocked,
+    // unless the probes have passed on that version on this machine.
+    const drift = driftMessage(runner.displayName, runner.id, versionDrift(runner.capabilities, detection.version, true, runner.localCheck));
+    if (drift && !driftReported.has(runner.id)) {
+      driftReported.add(runner.id);
+      report({ type: 'warning', message: drift });
+    }
     if (!runner.capabilities.verified) {
       if (role === 'implementer' && !options.allowUnverified) {
-        throw new Error(
-          `${runner.displayName} has an unverified adapter, so Warband cannot tell what it will do when allowed to edit. ` +
-            'See docs/runners.md, or pass --allow-unverified to accept that.',
-        );
+        throw new Error(unverifiedImplementerMessage(runner.displayName));
       }
       report({ type: 'warning', message: `${runner.displayName} (${role}) has an unverified adapter, see docs/runners.md` });
     }
@@ -201,6 +232,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     });
   }
 
+  // Read once: the prompts and the hashes in run_started come from the same text, whatever the file holds later.
   const skillTexts = await Promise.all(skills.filter((s) => agent.skills.includes(s.name)).map(async (s) => ({ name: s.name, text: await readFile(s.path, 'utf8') })));
   const hooks = agent.hooks.map((name) => allHooks.find((h) => h.name === name)).filter((h): h is Hook => h !== undefined);
   const hooksFor = (stage: HookStage): Hook[] => hooks.filter((h) => h.stage === stage);
@@ -210,16 +242,21 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   }
   const signal = options.signal;
 
-  // --- Worktree: the agents never touch the person's own checkout.
+  // --- Worktree: the agents never touch the person's own checkout, and the
+  // checkout is not an ancestor of their working directory (ADR-0003).
   // Two runs of one agent started within the same second get -2, -3...
+  const home = options.worktrees ?? worktreesHome();
   const stem = `${agent.name}-${stamp(now())}`;
   let runId = stem;
-  for (let n = 2; await branchExists(root, `warband/${runId}`); n++) runId = `${stem}-${n}`;
+  for (let n = 2; (await branchExists(root, `warband/${runId}`)) || existsSync(worktreePath(root, runId, home)); n++) {
+    runId = `${stem}-${n}`;
+  }
   const branch = `warband/${runId}`;
-  const worktree = join(warbandDir(options.root), 'worktrees', runId);
-  await excludeLocally(root, ['.warband/worktrees/', '.warband/runs/']);
+  const worktree = worktreePath(root, runId, home);
+  await mkdir(dirname(worktree), { recursive: true });
+  await excludeLocally(root, ['.warband/runs/']);
   await addWorktree(root, worktree, branch, base);
-  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base });
+  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base, skills: skillTexts.map((s) => ({ name: s.name, sha256: skillHash(s.text) })) });
 
   const ctx: PromptContext = {
     instructions: agent.description,
@@ -286,18 +323,22 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     return results;
   }
 
-  const describeFailures = (results: readonly HookResult[]): string =>
-    results
-      .filter((r) => !r.ok)
-      .map((r) => `Check "${r.name}" failed (${r.timedOut ? 'timed out' : `exit ${r.exitCode}`}). Its output:\n${r.output.join('\n')}`)
-      .join('\n\n');
+  const describeFailures = (results: readonly HookResult[]): Feedback => {
+    const failed = results.filter((r) => !r.ok);
+    const status = (r: HookResult): string => (r.timedOut ? 'timed out' : `exit ${r.exitCode}`);
+    return {
+      note: `These checks failed: ${failed.map((r) => `"${r.name}" (${status(r)})`).join(', ')}. Their output follows.`,
+      blocks: failed.map((r) => ({ kind: 'check-output', label: `${r.name}, ${status(r)}`, text: r.output.join('\n') || '(no output)' })),
+    };
+  };
 
   // --- The route. Each handler returns the stage outcome; advance() decides what comes next.
-  let feedback: string | undefined;
+  let feedback: Feedback | undefined;
   let planFeedback: string | undefined;
   let summary = '';
   let reviewComments: string[] = [];
   let reviewFindings: Finding[] = [];
+  let guarded: ProtectedChange[] = [];
   let commit: string | undefined;
 
   const handlers: Record<Stage, (state: RunState) => Promise<Outcome>> = {
@@ -337,8 +378,14 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
       const rework = state.reworks > 0 && feedback ? { attempt: state.reworks, feedback } : undefined;
       const result = await step('implement', 'implementer', implementPrompt(ctx, rework), 'edit');
       summary = result.text.trim();
+      // Deterministic: compare what changed with the protected paths, whatever the outcome.
+      guarded = findProtected(await changedFiles(worktree, base), protectedRules);
+      report({ type: 'protected_changes', changes: guarded });
       if (!result.ok) {
-        feedback = `The previous attempt did not finish: ${result.errors.join('; ') || 'the agent reported a failure'}.`;
+        feedback = {
+          note: 'The previous attempt did not finish. What the CLI reported follows.',
+          blocks: [{ kind: 'agent-error', text: result.errors.join('\n') || 'the agent reported a failure' }],
+        };
         return 'failed';
       }
       return 'ok';
@@ -354,11 +401,11 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     async review(state) {
       const change = await stagedDiff(worktree, base);
       if (change.diff.trim() === '') {
-        feedback = 'No files were changed. Implement the plan.';
+        feedback = { note: 'No files were changed. Implement the plan.', blocks: [] };
         reviewComments = ['No files were changed.'];
         return 'changes_requested';
       }
-      const result = await step('review', 'reviewer', reviewPrompt(ctx, { diff: change.diff, summary }), 'read', REVIEW_SCHEMA as unknown as Record<string, unknown>);
+      const result = await step('review', 'reviewer', reviewPrompt(ctx, { diff: change.diff, summary, protectedChanges: guarded }), 'read', REVIEW_SCHEMA as unknown as Record<string, unknown>);
       if (!result.ok) return 'failed';
       const answer = record(structuredAnswer(result));
       const verdict = answer?.['verdict'];
@@ -378,7 +425,16 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
 
     async accept() {
       const change = await stagedDiff(worktree, base);
-      const request: AcceptRequest = { summary, diffStat: change.stat, reviewComments, findings: reviewFindings, worktree, base, branch };
+      const request: AcceptRequest = {
+        summary,
+        diffStat: change.stat,
+        reviewComments,
+        findings: reviewFindings,
+        protectedChanges: guarded,
+        worktree,
+        base,
+        branch,
+      };
       report({ type: 'gate_open', stage: 'accept', result: request });
       const decision = await gate.acceptResult(request);
       report({ type: 'gate', stage: 'accept', outcome: decision.outcome, ...(decision.comment ? { comment: decision.comment } : {}) });
@@ -390,11 +446,15 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
           report({ type: 'plan_written', stage: 'accept', name, source: 'person', findings: lineComments.length });
         }
         const pending = pendingPlans(await readPlans(worktree));
+        // The person's own comment is theirs, so it is part of Warband's note; plans are material.
         const said =
           decision.comment && lineComments.length === 0 ? `The person who set the task asked for changes:\n${decision.comment}` : '';
-        feedback =
-          [said, pending.length > 0 ? plansFeedback(pending) : ''].filter(Boolean).join('\n\n') ||
-          'The person who set the task asked for changes but gave no details. Re-read the task and the plan.';
+        const plans = pending.length > 0 ? plansFeedback(pending) : undefined;
+        const note = [said, plans?.note ?? ''].filter(Boolean).join('\n\n');
+        feedback = {
+          note: note || 'The person who set the task asked for changes but gave no details. Re-read the task and the plan.',
+          blocks: plans?.blocks ?? [],
+        };
       }
       return decision.outcome;
     },

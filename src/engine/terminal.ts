@@ -1,4 +1,5 @@
 import type { Prompter } from '../wizard/agent-wizard.ts';
+import { describeProtected } from '../core/protected.ts';
 import { findingLine, pendingPlans, readPlans } from './plan-file.ts';
 import type { EngineEvent, GateDecision, HumanGate } from './run.ts';
 
@@ -51,6 +52,9 @@ export function renderEvent(event: EngineEvent, say: (text: string) => void): vo
     case 'review':
       say(`  verdict: ${event.verdict === 'approve' ? 'approved' : 'changes requested'}`);
       for (const f of event.findings) say(`    - ${findingLine(f)}`);
+      break;
+    case 'protected_changes':
+      if (event.changes.length > 0) say(`  ! protected files changed: ${event.changes.map(describeProtected).join('; ')}`);
       break;
     case 'plan_written':
       say(`  plan .plan/${event.name}: ${event.findings} item(s) from the ${event.source}`);
@@ -131,6 +135,10 @@ export function terminalGate(io: Prompter, openReslop?: (worktree: string) => Pr
       if (result.summary) io.say(result.summary);
       io.say('\nChanged files:');
       io.say(indent(result.diffStat.join('\n')));
+      if (result.protectedChanges.length > 0) {
+        io.say('\n! Protected files changed (configs, scripts, CI or tests; found without a model):');
+        for (const change of result.protectedChanges) io.say(`  ! ${describeProtected(change)}`);
+      }
       if (result.reviewComments.length > 0) {
         io.say('\nReviewer:');
         for (const comment of result.reviewComments) io.say(`  - ${comment}`);

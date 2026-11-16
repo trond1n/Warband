@@ -1,4 +1,4 @@
-import type { RunnerId } from './runner.ts';
+import type { RunnerId } from './runner-ids.ts';
 
 export type Role = 'planner' | 'implementer' | 'reviewer';
 
@@ -10,24 +10,30 @@ export interface RoleAssignment {
 
 export type Roles = Record<Role, RoleAssignment>;
 
+export type RoleProblemCode = 'same-cli-no-model' | 'same-cli-and-model';
+
+/** A broken role rule, with a code for the window and the wizard's text. */
+export interface RoleProblem {
+  code: RoleProblemCode;
+  message: string;
+}
+
 /**
  * The one rule Warband insists on: whoever writes the code does not get to
  * accept it. The reviewer must differ from the implementer by CLI or by model.
  */
-export function validateRoles(roles: Pick<Roles, 'implementer' | 'reviewer'>): string[] {
-  const problems: string[] = [];
+export function checkRoles(roles: Pick<Roles, 'implementer' | 'reviewer'>): RoleProblem[] {
   const { implementer, reviewer } = roles;
-
-  if (implementer.runner === reviewer.runner) {
-    if (!implementer.model || !reviewer.model) {
-      problems.push(
-        'implementer and reviewer use the same CLI, so both need an explicit model to prove they differ',
-      );
-    } else if (implementer.model === reviewer.model) {
-      problems.push('reviewer must not be the same CLI and model as the implementer');
-    }
+  if (implementer.runner !== reviewer.runner) return [];
+  if (!implementer.model || !reviewer.model) {
+    return [{ code: 'same-cli-no-model', message: 'implementer and reviewer use the same CLI, so both need an explicit model to prove they differ' }];
   }
-  return problems;
+  if (implementer.model === reviewer.model) return [{ code: 'same-cli-and-model', message: 'reviewer must not be the same CLI and model as the implementer' }];
+  return [];
+}
+
+export function validateRoles(roles: Pick<Roles, 'implementer' | 'reviewer'>): string[] {
+  return checkRoles(roles).map((p) => p.message);
 }
 
 /** Starting points for the agent pairs the team actually uses. */

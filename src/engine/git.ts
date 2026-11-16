@@ -2,6 +2,7 @@ import { appendFile, mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 import { runProcess } from '../core/proc.ts';
+import type { FileChange } from '../core/protected.ts';
 
 export interface GitResult {
   code: number | null;
@@ -92,6 +93,23 @@ export async function removeWorktree(root: string, path: string, deleteBranch?: 
 export const UNSTAGED_DIRS = ['.plan', '.log'] as const;
 const stageAll = (worktree: string): Promise<string[]> =>
   gitOk(worktree, ['add', '-A', '--', '.', ...UNSTAGED_DIRS.map((dir) => `:(exclude)${dir}`)]);
+
+/** Files changed in the worktree against `base`, renames detected. Stages them first. */
+export async function changedFiles(worktree: string, base: string): Promise<FileChange[]> {
+  await stageAll(worktree);
+  return parseNameStatus(await gitOk(worktree, ['diff', '--cached', '--name-status', '-M', base]));
+}
+
+/** Lines of `git diff --name-status -M`: "M\tpath", "D\tpath", "R087\told\tnew". */
+export function parseNameStatus(lines: readonly string[]): FileChange[] {
+  return lines.flatMap((line): FileChange[] => {
+    const [code = '', first, second] = line.split('\t');
+    const status = code.charAt(0);
+    if (!first) return [];
+    if ((status === 'R' || status === 'C') && second) return [{ status, path: second, from: first }];
+    return [{ status, path: first }];
+  });
+}
 
 /** Stages everything in the worktree and returns the diff against `base`. */
 export async function stagedDiff(worktree: string, base: string): Promise<{ diff: string; stat: string[] }> {

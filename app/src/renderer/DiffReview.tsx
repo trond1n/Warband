@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 
 import type { DiffFile, Finding } from '../shared/api.ts';
 import { Markdown } from './Markdown.tsx';
-import { findingTarget } from './model.ts';
+import { findingTarget, protectedLine } from './model.ts';
 import type { OpenGate } from './model.ts';
 
 /*
@@ -161,6 +161,22 @@ export function DiffReview({ root, runId, gate }: { root: string; runId: string;
         <h2>Приёмка: дифф и решение</h2>
         <span className="muted small">Кликните по номеру строки справа, чтобы оставить комментарий.</span>
       </div>
+
+      {gate.protectedChanges.length > 0 && (
+        <div className="protected" role="note" aria-label="Изменены защищённые файлы">
+          <strong>Изменены защищённые файлы</strong>
+          <span className="muted small"> — конфиги, скрипты, CI или тесты; найдено без модели. Проверьте, что проверки не ослаблены.</span>
+          <ul>
+            {gate.protectedChanges.map((c) => (
+              <li key={`${c.from ?? ''}${c.path}`}>
+                <button className="link" onClick={() => goTo(c.path)}>
+                  {protectedLine(c)}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       <div className="accept-top">
         {gate.summary && (
