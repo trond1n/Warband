@@ -3,7 +3,7 @@ import { existsSync, watch } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electron';
 
@@ -15,8 +15,10 @@ import type { AgentInput } from '../../../src/core/agents.ts';
 import type { RunnerId } from '../../../src/core/runner.ts';
 import { which } from '../../../src/core/which.ts';
 import { git, repoRoot } from '../../../src/engine/git.ts';
+import { worktreesHome } from '../../../src/engine/places.ts';
 import { RUNNER_IDS } from '../../../src/runners/registry.ts';
 import type { AppState, GateDecision, TimedEvent, ToolInfo } from '../shared/api.ts';
+import { openablePath, openableRoots, runId, senderAllowed, terminalCommand } from './guards.ts';
 import { HookService } from './hooks.ts';
 import { AgentService } from './agents.ts';
 import { SkillService } from './skills.ts';
@@ -225,17 +227,8 @@ function decision(value: unknown): GateDecision {
 
 /** reslop is full-screen, so it gets its own terminal window. */
 function openTerminal(cwd: string, program: string): void {
-  const opts = { cwd, detached: true, stdio: 'ignore' as const };
-  let child;
-  if (process.platform === 'win32') {
-    child = spawn('cmd.exe', ['/d', '/c', `start "reslop" /D "${cwd}" cmd /k ${program}`], { ...opts, windowsVerbatimArguments: true });
-  } else if (process.platform === 'darwin') {
-    const script = `tell application "Terminal" to do script "cd ${JSON.stringify(cwd).slice(1, -1)} && ${program}"`;
-    child = spawn('osascript', ['-e', script, '-e', 'tell application "Terminal" to activate'], opts);
-  } else {
-    child = spawn('x-terminal-emulator', ['-e', 'sh', '-c', `cd "$1" && ${program}`, 'sh', cwd], opts);
-  }
-  child.unref();
+  const { command, args, verbatim } = terminalCommand(process.platform, cwd, program);
+  spawn(command, args, { cwd, detached: true, stdio: 'ignore', windowsVerbatimArguments: verbatim }).unref();
 }
 
 const providers = new ProviderService({
@@ -267,14 +260,21 @@ const manager = new RunManager({
   },
 });
 
+/** Every call must come from the main frame of our window, showing the page we loaded. */
 function handle(channel: string, fn: (...args: unknown[]) => unknown): void {
   ipcMain.handle(`warband:${channel}`, (event, ...args) => {
-    if (event.senderFrame?.url && !event.senderFrame.url.startsWith(rendererOrigin())) throw new Error('unexpected sender');
+    const frame = event.senderFrame;
+    const sender = {
+      ourWindow: window !== undefined && !window.isDestroyed() && event.sender === window.webContents,
+      frame: frame ? { url: frame.url, isMain: frame === event.sender.mainFrame && frame.parent === null } : null,
+    };
+    if (!senderAllowed(sender, pageUrl())) throw new Error('unexpected sender');
     return fn(...args);
   });
 }
 
-const rendererOrigin = (): string => (process.env['ELECTRON_RENDERER_URL'] ? new URL(process.env['ELECTRON_RENDERER_URL']).origin : 'file://');
+/** The page the window loads: the dev server's in development, the built index.html otherwise. */
+const pageUrl = (): string => process.env['ELECTRON_RENDERER_URL'] ?? pathToFileURL(join(here, '../renderer/index.html')).href;
 
 function registerIpc(): void {
   handle('state', () => state());
@@ -299,16 +299,29 @@ function registerIpc(): void {
   });
   handle('project', async (root) => manager.project(await knownProject(root)));
   handle('runs', async (root) => manager.runs(await knownProject(root)));
-  handle('run', async (root, runId) => manager.run(await knownProject(root), text(runId, 'run id')));
+  // Run ids are checked before anything else, since they become folder names.
+  handle('run', async (root, id) => {
+    const run = runId(id);
+    return manager.run(await knownProject(root), run);
+  });
   handle('start', async (root, agent, task) => manager.start(await knownProject(root), text(agent, 'agent'), text(task, 'task')));
-  handle('cancel', (runId) => manager.cancel(text(runId, 'run id')));
-  handle('decide', (runId, value) => manager.decide(text(runId, 'run id'), decision(value)));
-  handle('answer', (runId, answers) => manager.answer(text(runId, 'run id'), text(answers, 'answers')));
-  handle('diff', async (root, runId) => manager.diff(await knownProject(root), text(runId, 'run id')));
-  handle('plans', async (root, runId) => manager.plans(await knownProject(root), text(runId, 'run id')));
-  handle('openReslop', async (root, runId) => {
+  handle('cancel', (id) => manager.cancel(runId(id)));
+  handle('decide', (id, value) => manager.decide(runId(id), decision(value)));
+  handle('answer', (id, answers) => manager.answer(runId(id), text(answers, 'answers')));
+  handle('diff', async (root, id) => {
+    const run = runId(id);
+    return manager.diff(await knownProject(root), run);
+  });
+  handle('plans', async (root, id) => {
+    const run = runId(id);
+    return manager.plans(await knownProject(root), run);
+  });
+  handle('openReslop', async (root, id) => {
+    const run = runId(id);
     if (!reslop) return { ok: false, message: 'reslop не установлен: npm i -g reslop' };
-    const worktree = await manager.worktree(await knownProject(root), text(runId, 'run id'));
+    const recorded = await manager.worktree(await knownProject(root), run);
+    // The path comes from the run's log on disk, so it is held to the same rule as openPath.
+    const worktree = recorded === undefined ? undefined : await openablePath(recorded, [worktreesHome()]);
     if (!worktree) return { ok: false, message: 'worktree прогона уже удалён' };
     openTerminal(worktree, 'reslop');
     return { ok: true };
@@ -359,9 +372,11 @@ function registerIpc(): void {
     skills.save(await knownProject(root), skillInput(input), original === null ? undefined : skillName(original), text(version, 'version'), agentNames(renameAgents)),
   );
   handle('deleteSkill', async (root, name, version) => skills.remove(await knownProject(root), skillName(name), text(version, 'version')));
+  // Only run worktrees and the run logs of known projects; anything else, or a symlink out of them, is refused.
   handle('openPath', async (path) => {
-    const target = text(path, 'path');
-    if (existsSync(target)) await shell.openPath(target);
+    const target = await openablePath(text(path, 'path'), openableRoots(worktreesHome(), (await loadSettings()).projects));
+    if (target === undefined) throw new Error('path outside run worktrees and run logs');
+    await shell.openPath(target);
   });
 }
 

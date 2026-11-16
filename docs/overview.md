@@ -44,7 +44,7 @@ One workflow for a coding task, whichever agent CLIs the team has: clarify, plan
 
 ## How it was checked
 
-- 201 tests on `node:test`. The engine and the window's run manager run against real git repositories with scripted agents. The providers settings and the Providers screen's service run against temporary settings folders with scripted CLIs and probes; the hooks and skills functions and the Hooks and Skills screens' services, trial runs included, against temporary project folders. `tsc` is clean for the core and the app.
+- 208 tests on `node:test`. The engine and the window's run manager run against real git repositories with scripted agents. The providers settings and the Providers screen's service run against temporary settings folders with scripted CLIs and probes; the hooks and skills functions and the Hooks and Skills screens' services, trial runs included, against temporary project folders. `tsc` is clean for the core and the app.
 - Isolation probes on Claude Code 2.1.325 (docs/runners.md):
   - **before** the tool restriction, a shell `cat ../file` in read mode and a `Write` outside cwd in edit mode were both denied by Claude Code's own path check;
   - **after** it, read and grep outside cwd, a committed `.claude/settings.json` that allows the parent, and a write outside cwd were all denied as well;
