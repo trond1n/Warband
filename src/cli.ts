@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { stdin, stdout } from 'node:process';
 import { createInterface } from 'node:readline';
 import { existsSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,6 +30,10 @@ import { createRunners, RUNNER_IDS } from './runners/registry.ts';
 import { driftMessage, versionDrift } from './core/runner.ts';
 import type { Runner } from './core/runner.ts';
 import { agentWizard } from './wizard/agent-wizard.ts';
+import { estimateCalls, runBench } from './bench/bench.ts';
+import type { BenchReport } from './bench/bench.ts';
+import { compareReports, renderReport } from './bench/report.ts';
+import { loadTasks } from './bench/tasks.ts';
 import type { Prompter } from './wizard/agent-wizard.ts';
 
 const HELP = `warband <command> [--dir <project>]
@@ -42,6 +47,11 @@ Commands:
                          --allow-unverified lets an unverified adapter edit files
   check <agent> [stage]  Run the agent's hooks here, without any model (stage: ${HOOK_STAGES.join(', ')};
                          default checks and finish)
+  bench <agent>          Run the bench tasks (bench/tasks) with the agent, one at a time, each in a
+                         fresh temporary repository with the gates answered automatically, and write
+                         bench/results/<date>-<agent>.json. Asks before it starts.
+                         --tasks a,b    only these tasks        --repeat N    each task N times
+  bench --compare A B    Compare two bench reports task by task
   ui                     Open the desktop window for the project (Electron); builds it on first use
   help                   Show this message
 
@@ -314,6 +324,112 @@ function openInTerminal(program: string, cwd: string): Promise<void> {
 }
 
 const APP_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'app');
+/** The bench of this Warband checkout: tasks/ and results/. */
+const BENCH_DIR = process.env['WARBAND_BENCH_DIR'] ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'bench');
+
+const option = (args: string[], name: string): string | undefined => {
+  const at = args.indexOf(name);
+  if (at === -1) return undefined;
+  const value = args[at + 1];
+  args.splice(at, 2);
+  if (value === undefined || value.startsWith('--')) throw new Error(`${name} needs a value`);
+  return value;
+};
+
+async function readReport(path: string): Promise<BenchReport> {
+  const data = JSON.parse(await readFile(path, 'utf8')) as BenchReport;
+  if (data.format !== 1 || !Array.isArray(data.runs)) throw new Error(`${path} is not a bench report`);
+  return data;
+}
+
+async function bench(root: string, args: string[]): Promise<number> {
+  const compare = args.indexOf('--compare');
+  if (compare !== -1) {
+    const [a, b] = args.slice(compare + 1);
+    if (!a || !b) {
+      console.error('Usage: warband bench --compare <a.json> <b.json>');
+      return 2;
+    }
+    for (const line of compareReports(await readReport(a), await readReport(b))) console.log(line);
+    return 0;
+  }
+  const only = option(args, '--tasks');
+  const repeatText = option(args, '--repeat');
+  const repeat = repeatText === undefined ? 1 : Number(repeatText);
+  if (!Number.isInteger(repeat) || repeat < 1) {
+    console.error('--repeat needs a whole number, 1 or more');
+    return 2;
+  }
+  const [agentName, ...extra] = args;
+  if (!agentName || extra.length > 0) {
+    console.error('Usage: warband bench <agent> [--tasks a,b] [--repeat N]');
+    return 2;
+  }
+  const agent = await loadAgent(root, agentName);
+  if (!agent) {
+    console.error(`No agent "${agentName}" in ${root}. See: warband agent list`);
+    return 2;
+  }
+  const tasks = await loadTasks(join(BENCH_DIR, 'tasks'), only?.split(',').map((t) => t.trim()).filter(Boolean));
+  const known = await listSkills(root);
+  const skills = await Promise.all(
+    agent.skills.map(async (name) => {
+      const skill = known.find((s) => s.name === name);
+      if (!skill) throw new Error(`skill ${name} of /${agent.name} is missing in ${root}`);
+      return { name, text: await readFile(skill.path, 'utf8') };
+    }),
+  );
+
+  const estimate = estimateCalls(tasks, repeat);
+  const role = (r: { runner: string; model?: string }): string => `${r.runner} ${r.model ?? 'default model'}`;
+  console.log(`Bench of /${agent.name}: implementer ${role(agent.roles.implementer)}, reviewer and planner ${role(agent.roles.reviewer)}.`);
+  console.log(`Skills: ${agent.skills.join(', ') || 'none'}. The agent's hooks are replaced by each task's checks.`);
+  for (const task of tasks) {
+    const scripted = [task.scripted.planner ? 'planner' : '', task.scripted.implementer ? 'implementer' : ''].filter(Boolean);
+    const variants = task.variants.length > 1 ? ` x${task.variants.length} (${task.variants.map((v) => v.name).join(', ')})` : '';
+    console.log(`  ${task.id}${variants}${scripted.length > 0 ? `, scripted ${scripted.join(' and ')}` : ''}`);
+  }
+  console.log(
+    `${tasks.length} task(s), ${estimate.runs} run(s) one after another; about ${estimate.min} model call(s), at most ${estimate.max} if every rework is used.`,
+  );
+  console.log('Gates are answered automatically, in temporary repositories only (ADR-0004).');
+  const io = terminalPrompter();
+  let answer: string;
+  try {
+    answer = await io.ask('Start? [y/N] ').catch(() => '');
+  } finally {
+    io.close();
+  }
+  if (!/^y(es)?$/i.test(answer.trim())) {
+    console.log('Nothing run.');
+    return 1;
+  }
+
+  const startedAt = new Date();
+  const p = (n: number): string => String(n).padStart(2, '0');
+  const stem = `${startedAt.getFullYear()}-${p(startedAt.getMonth() + 1)}-${p(startedAt.getDate())}-${p(startedAt.getHours())}${p(startedAt.getMinutes())}-${agent.name}`;
+  const resultsDir = join(BENCH_DIR, 'results');
+  const report = await runBench({
+    tasks,
+    agent,
+    skills,
+    runners: await machineRunners(),
+    repeat,
+    logDir: join(resultsDir, stem),
+    onProgress: (line) => console.log(line),
+    onEvent: (_key, _attempt, event) => {
+      if (event.type === 'stage') console.log(`  ${event.stage}${event.reworks > 0 ? ` (rework ${event.reworks})` : ''}`);
+      else if (event.type === 'warning') console.log(`  warning: ${event.message}`);
+    },
+  });
+  await mkdir(resultsDir, { recursive: true });
+  const file = join(resultsDir, `${stem}.json`);
+  await writeFile(file, `${JSON.stringify(report, null, 2)}\n`);
+  console.log('');
+  for (const line of renderReport(report)) console.log(line);
+  console.log(`\nReport: ${file}`);
+  return 0;
+}
 
 /** Runs a Node script to the end with inherited output, for the one-off build steps of `ui`. */
 function runNode(args: readonly string[], cwd: string): Promise<number> {
@@ -392,6 +508,8 @@ async function main(argv: readonly string[]): Promise<number> {
       return ui(root);
     case 'check':
       return check(root, sub, extra);
+    case 'bench':
+      return bench(root, args.slice(1));
     case 'help':
     case '--help':
     case '-h':
