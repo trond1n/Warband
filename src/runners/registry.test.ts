@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { parseVersion } from '../core/runner.ts';
 import type { RunRequest } from '../core/runner.ts';
-import { CLAUDE_TOOLS, claudeArgs } from './registry.ts';
+import { CLAUDE_TOOLS, claudeArgs, createRunners, parseClaudeLogin, RUNNERS } from './registry.ts';
 
 /*
  * The Claude Code arguments are a security boundary (docs/runners.md,
@@ -27,4 +28,30 @@ test('Claude Code: no shell and no MCP servers for any role', () => {
   assert.equal(after(args('edit'), '--tools'), 'Read,Glob,Grep,Edit,Write');
   assert.equal(after(args('read'), '--permission-mode'), 'manual');
   assert.equal(after(args('edit'), '--permission-mode'), 'acceptEdits');
+});
+
+test('a binary set in the machine settings replaces the PATH lookup for that CLI only', () => {
+  const runners = createRunners({ claude: { binary: 'D:/tools/claude.exe', models: [] }, kimi: { models: ['k2'] } });
+  assert.equal(runners.claude.binary, 'D:/tools/claude.exe');
+  assert.equal(runners.kimi.binary, 'kimi');
+  assert.equal(runners.antigravity.binary, 'agy');
+  assert.equal(RUNNERS.claude.binary, 'claude');
+  assert.equal(runners.claude.capabilities.verified, RUNNERS.claude.capabilities.verified);
+});
+
+test('only Claude Code reports its login, and only the flag and method are kept', () => {
+  assert.ok(RUNNERS.claude.login);
+  assert.equal(RUNNERS.codex.login, undefined);
+  assert.equal(RUNNERS.antigravity.login, undefined);
+  assert.equal(RUNNERS.kimi.login, undefined);
+  const status = JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', email: 'someone@example.invalid', orgName: 'Org' });
+  assert.deepEqual(parseClaudeLogin(status), { state: 'in', method: 'claude.ai' });
+  assert.deepEqual(parseClaudeLogin('{"loggedIn": false}'), { state: 'out' });
+  assert.deepEqual(parseClaudeLogin('{}'), { state: 'unknown' });
+});
+
+test('every verified adapter records the version it was verified on', () => {
+  for (const runner of Object.values(RUNNERS)) {
+    if (runner.capabilities.verified) assert.ok(parseVersion(runner.capabilities.verifiedOn), runner.id);
+  }
 });

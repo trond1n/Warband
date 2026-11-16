@@ -120,10 +120,30 @@ The GLM coding plan is used through Claude Code by pointing that CLI at a differ
 
 Tests run the mappers over fixtures in `src/runners/events/fixtures/`. These are real spike logs passed through `scripts/spike/fixture.ts`, which replaces ids, paths and per-account data.
 
+## Settings per machine and probes from the window
+
+`providers.json` in the machine settings folder (see the README, "Providers") can give a CLI's binary as a full path and keep a list of model ids. `createRunners` in `src/runners/registry.ts` builds the runners with that path, and `warband doctor`, `warband run`, `npm run spike` and the window all use it. A path must be absolute and must point to a file. On Windows it must not be a `.cmd`, `.bat` or `.ps1`, because agent CLIs are launched without a shell. A model id must not start with a dash, because it is passed as the argument after `--model`.
+
+The window's **Проверить** runs the probes in `scripts/spike/probes.ts`, one after another, on one CLI at a time. It writes no logs: for raw output, run `npm run spike`. The results never change `verified`.
+
+Login state comes only from the CLI itself. Claude Code reports it with `claude auth status --json` (2.1.325). Warband keeps only `loggedIn` and `authMethod` from that output and drops the account fields. `agy` 1.5.9 has no such command in `--help`, so its state is shown as unknown. Codex and Kimi have not been tried.
+
 ## Adding a runner
 
 1. Add a spec to `src/runners/registry.ts` with `verified: false`.
 2. Run `npm run spike -- <id>` (or `--probe=pong` / `--probe=write`) and read `spike-output/<id>.<probe>.log`. Take flags from `<binary> --help` of the installed version.
 3. Record the version and the findings here.
 4. Write `src/runners/events/<id>.ts` against what the log shows. Make fixtures with `node scripts/spike/fixture.ts spike-output/<id>.<probe>.log src/runners/events/fixtures/<id>.<probe>.jsonl`, read them, and add tests.
-5. Set `verified: true` once every capability field has been checked.
+5. Set `verified: true` once every capability field has been checked, and `verifiedOn` to the version the probes ran on.
+
+### Version drift
+
+CLIs update themselves (agy went from 1.5.0 to 1.5.9 during one probing session), so a verified adapter records the version it was checked on in `capabilities.verifiedOn`. `versionDrift` in `src/core/runner.ts` compares it with what `--version` prints. Every part of the version is compared, patch included. These CLIs ship under the patch number (Claude Code 2.1.325 is one of many 2.1 releases), and the headless contract has changed inside a patch series, as with agy's print mode between 1.5.0 and 1.5.9. Comparing only the major or minor part would miss exactly those releases. The cost is a warning after most Claude Code updates, which is the point: the probes are cheap next to an unnoticed change in what a headless run may do.
+
+A different version is reported by `warband doctor`, on the Providers card, and as a warning at the start of a run. A version that cannot be read is reported the same way. Nothing is blocked.
+
+A warning after every update would stop being read, so a probe run can settle it on one machine. `RECORDED` in `scripts/spike/probes.ts` holds, for each verified adapter, the results its probes gave on `verifiedOn` (a test keeps the two equal). When every probe runs, from the window's **Проверить** or from `npm run spike -- <id>` without `--probe`, the results are compared with `RECORDED`, and the run is kept in `providers.json` as `check: { version, at, differs }`. If `differs` is empty, that exact version counts as checked on this machine: no warning on the card, in `doctor` or before a run, and the card shows it apart from `verifiedOn` ("verified on 2.1.325, probes passed here on X"). If any probe differed, the warning stays and names those probes. Only the latest full run is kept; a stopped or partial run is not recorded, and the next update is reported again.
+
+Compared per probe: whether the answer or marker appeared, whether the file exists afterwards, and the exit code. Tool names, timing and line counts are not: the model picks its tools differently from run to run, and the contract is about what got through, not how it was tried. The answer of `write` and `outside-write` is not compared either, since a refusal may contain "done"; the file is the signal there.
+
+`verifiedOn` itself only moves in the code, after someone reads the logs, updates this file and `RECORDED`.

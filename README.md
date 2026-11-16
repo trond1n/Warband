@@ -22,6 +22,16 @@ npm test
 npx tsc
 ```
 
+### Providers: settings per machine
+
+A CLI that is not on PATH can be given a full path, and each CLI can have a list of model ids you keep yourself (offered when an agent is set up). These describe the computer, not the project, so they live outside `.warband/`, in `providers.json` in the window's settings folder: `%APPDATA%\Warband` on Windows, `~/Library/Application Support/Warband` on macOS, `$XDG_CONFIG_HOME/Warband` (or `~/.config/Warband`) elsewhere. `WARBAND_CONFIG_DIR` overrides it.
+
+```json
+{ "providers": { "antigravity": { "binary": "C:/Users/me/AppData/Local/agy/bin/agy.exe", "models": ["gemini-3-pro"] } } }
+```
+
+`warband doctor`, `warband run`, `warband agent new`, `npm run spike` and the window all launch the binary set there. The `models` list is what the agent form and `warband agent new` offer when a model is picked. The file holds no keys or logins. Edit it in the window (**Провайдеры**) or by hand. A new CLI cannot be added there: it needs an adapter in code, see [Adding a runner](docs/runners.md#adding-a-runner).
+
 ## Agents
 
 An agent is a reusable task such as `/test`:
@@ -54,9 +64,11 @@ Everything is saved as plain files in `<project>/.warband/`: `agents/<name>.json
 6. **accept**: you see the summary, the changed files and the reviewer's comments. You accept, ask for changes, or reject.
 7. **finish**: the `finish` hooks run, then the work is committed on the run's branch. Nothing is merged into your branch: `git merge warband/<run>` when you want it.
 
-After 3 reworks the run stops. Your own checkout is never touched, and uncommitted changes in it are not part of the run. A stopped run with changes keeps its worktree so you can look at it. Every event goes to `.warband/runs/<run>/events.jsonl`, which is kept out of `git status` through `.git/info/exclude`.
+After 3 reworks the run stops. Your own checkout is never touched, and uncommitted changes in it are not part of the run. A stopped run with changes keeps its worktree so you can look at it. Every event goes to `.warband/runs/<run>/events.jsonl`, which is kept out of `git status` through `.git/info/exclude`. Its first event, `run_started`, lists the skills the prompts were built from with the sha256 of each file's text, so a skill edited during or after the run does not hide which version the run followed.
 
 Only adapters marked verified in `docs/runners.md` may implement. `--allow-unverified` overrides that.
+
+A verified adapter records the CLI version it was verified on. CLIs update themselves, so when the installed version is different (any part of it, patch included), the run starts with a warning that suggests running the probes. `warband doctor` and the Providers screen say the same. The run is not blocked.
 
 ### Protected paths
 
@@ -90,12 +102,16 @@ warband ui     # from the project folder; builds the window on first use
 
 The same runs, in a desktop window (Electron, see [ADR-0002](docs/adr/0002-desktop-window.md)):
 
-- On the left: the project, **New task**, runs waiting for you at a gate, and the history by day. Ctrl+B hides the panel.
+- On the left: the project, **New task**, the **Setup** section (Настройка), runs waiting for you at a gate, and the history by day. Ctrl+B hides the panel.
+- **Providers** (Провайдеры), under Setup, is about this machine rather than the project. There is a card for each CLI Warband has an adapter for. Each card shows whether the CLI is installed, its version, whether the adapter is verified, what is known about its sandbox and headless approvals, and the login state. The login state is shown only when the CLI reports it itself (`claude auth status`); otherwise it reads "unknown". The card's section of `docs/runners.md` opens in place. The path to the binary and the model list are edited there, with the same validation as the core. A settings form warns before you leave with unsaved edits, and if `providers.json` changes on disk while you edit, it says so instead of writing over it. **Проверить** runs the `scripts/spike` probes on that CLI after a warning that they are real model calls and spend subscription quota, and shows their results in a table. The results do not change `verified`, which stays in code. When the installed version differs from the one the adapter was verified on, the card says so and offers to run the probes. A full probe run whose results match the ones the adapter was verified with marks the installed version as checked on this machine (kept in `providers.json`): the card then reads "verified on 2.1.325, probes passed here on X", and neither the card, `doctor` nor a run warn about that version. If any probe differs, the warning stays and names it. Dialogs are modal: while one is open, the rest of the window takes no focus, keys or clicks.
+- **Agents** (Агенты), under Setup, makes and edits agents without the terminal: the name (as in the wizard, `/test`), what the agent does (its instructions), the skills and hooks it uses, picked from the project, and the implementer and reviewer, each a provider and a model. Hooks are grouped by stage (setup, checks, finish). Each skill shows its size, with the total under the list: that text goes into every prompt of a run. The model is picked from the list kept on the Providers screen, the CLI's default, or typed in; `warband agent new` offers the same list. A provider that is not installed, an unverified adapter as implementer (with the engine's own refusal text) and another version than the adapter was verified on are marked apart. The reviewer-is-not-the-implementer rule shows as the roles are picked. One sentence under the form says who writes, who reviews and which checks run. **+ новый скилл** and **+ новый хук** open those screens and come back to the form as it was, with the new one picked. Saved agents are the same files the wizard writes from the same answers. Rename, duplicate and delete leave the logs of past runs alone; they open under the agent's old name. **Запустить задачу с этим агентом** opens New task with the agent picked.
+- **Hooks** (Хуки), under Setup, edits the open project's `.warband/hooks.json` one hook at a time: name, description, command, stage (setup, checks, finish), environment variables and `reduce`, with whether reslop is on PATH shown next to it and a note on `{warband}` under the command. The core validates every save with the same rules as `warband agent new`: a command the policy denies is not saved, and the reason is shown at the command field. The file comes out the same as the wizard would write it. Each hook shows the agents that use it. `reduce` works only for the checks stage; on another stage the save is refused with that message at the field, and the person takes the flag off or changes the stage. A used hook cannot be deleted (the dialog lists the agents). Renaming a used hook first lists the agents that use it, then updates the hook and their hook lists as one change: everything is written or nothing is. **Дублировать** makes a copy under a new name. **Пробный запуск** runs the hook as the form has it, in the project checkout, as `warband check` does: a dialog shows the exact command line, folder and variables first, the main process runs only the command that was confirmed, and the run can be stopped. The result shows the exit code, the time and the last lines of output. With `reduce`, reslop records the run in `.log/` of the checkout; after a trial run, as after `warband check` in the terminal, the files it created there are removed and any old record it rotated away is put back, so the working copy is as before. Other files in `.log/` are not touched.
+- **Skills** (Скиллы), under Setup, edits the Markdown files in `.warband/skills/`: name and description in fields, written to the front matter in the format the wizard writes and `parseFrontMatter` reads (other front matter lines are kept), the body in a Monaco editor with a preview through the same Markdown component as the run pages, which renders no HTML. Each skill shows its size in characters and the agents that use it, since the whole file goes into the prompt of every run of those agents, and the sha256 that run_started records. Renaming works like renaming a hook: the file moves to `<new name>.md` and the agents that list the skill are updated in the same change, after a dialog with their list. A used skill is not deleted. Line ends follow the file; a new skill gets LF.
 - A run has a header with its status, branch and actions (cancel, open the worktree, merge into your branch when it is done), and four tabs: **Timeline** (a bar per stage visit, reworks included), **Log** (agent tool calls and text, hooks, decisions), **Checks** (hook output) and **Review plans**.
 - At a gate the run shows the plan, the questions or the change. At acceptance there is a side-by-side diff (Monaco), the reviewer's findings pinned to their lines, and your own comments: click a line number. Comments go back to the implementer as a review plan.
 - A notification appears when a gate opens and the window is not in focus.
 
-`npm run dev -w @warband/app` runs the window with hot reload. `WARBAND_SCREENSHOT=<file.png>` saves what the window shows after start and quits, and `WARBAND_OPEN_RUN=<run id>` opens a run's page.
+`npm run dev -w @warband/app` runs the window with hot reload. `WARBAND_SCREENSHOT=<file.png>` saves what the window shows after start and quits. `WARBAND_OPEN_RUN=<run id>` opens a run's page, and `WARBAND_OPEN_VIEW=providers`, `agents`, `skills` or `hooks` opens that screen.
 
 ## reslop
 

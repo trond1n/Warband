@@ -9,13 +9,14 @@ import type { AgentEvent } from '../core/events.ts';
 import { runHook } from '../core/hooks.ts';
 import type { Hook, HookResult, HookStage } from '../core/hooks.ts';
 import type { RoleAssignment } from '../core/roles.ts';
+import { driftMessage, unverifiedImplementerMessage, versionDrift } from '../core/runner.ts';
 import type { Access, Runner, RunnerId } from '../core/runner.ts';
 import { advance, DEFAULT_ROUTE, initialState } from '../core/stages.ts';
 import type { Outcome, RouteOptions, RunState, Stage } from '../core/stages.ts';
 import { which } from '../core/which.ts';
 import { protectedChanges as findProtected } from '../core/protected.ts';
 import type { ProtectedChange } from '../core/protected.ts';
-import { listSkills, loadHooks, loadProtected, warbandDir } from '../core/workspace.ts';
+import { listSkills, loadHooks, loadProtected, skillHash, warbandDir } from '../core/workspace.ts';
 import {
   addWorktree,
   branchExists,
@@ -46,7 +47,21 @@ export type Role = 'planner' | 'implementer' | 'reviewer';
 
 /** Everything the engine reports. A UI only needs to render this stream. */
 export type EngineEvent =
-  | { type: 'run_started'; runId: string; agent: string; task: string; worktree: string; branch: string; base: string }
+  | {
+      type: 'run_started';
+      runId: string;
+      agent: string;
+      task: string;
+      worktree: string;
+      branch: string;
+      base: string;
+      /**
+       * The skills that went into the prompts, with the sha256 of the text
+       * used, so the log shows which version of each file a run followed.
+       * Absent in logs written before it was recorded.
+       */
+      skills?: { name: string; sha256: string }[];
+    }
   | { type: 'warning'; message: string }
   | { type: 'stage'; stage: Stage; reworks: number }
   | { type: 'agent_started'; stage: Stage; role: Role; runner: RunnerId; model?: string; access: Access }
@@ -189,16 +204,21 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     implementer: agent.roles.implementer,
     reviewer: agent.roles.reviewer,
   };
+  const driftReported = new Set<RunnerId>();
   for (const role of ['planner', 'implementer', 'reviewer'] as const) {
     const runner = runners[roles[role].runner];
     const detection = await runner.detect();
     if (!detection.found) throw new Error(`${runner.displayName} (${role}) is not installed`);
+    // A CLI that updated itself since its adapter was verified is reported once, not blocked,
+    // unless the probes have passed on that version on this machine.
+    const drift = driftMessage(runner.displayName, runner.id, versionDrift(runner.capabilities, detection.version, true, runner.localCheck));
+    if (drift && !driftReported.has(runner.id)) {
+      driftReported.add(runner.id);
+      report({ type: 'warning', message: drift });
+    }
     if (!runner.capabilities.verified) {
       if (role === 'implementer' && !options.allowUnverified) {
-        throw new Error(
-          `${runner.displayName} has an unverified adapter, so Warband cannot tell what it will do when allowed to edit. ` +
-            'See docs/runners.md, or pass --allow-unverified to accept that.',
-        );
+        throw new Error(unverifiedImplementerMessage(runner.displayName));
       }
       report({ type: 'warning', message: `${runner.displayName} (${role}) has an unverified adapter, see docs/runners.md` });
     }
@@ -212,6 +232,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     });
   }
 
+  // Read once: the prompts and the hashes in run_started come from the same text, whatever the file holds later.
   const skillTexts = await Promise.all(skills.filter((s) => agent.skills.includes(s.name)).map(async (s) => ({ name: s.name, text: await readFile(s.path, 'utf8') })));
   const hooks = agent.hooks.map((name) => allHooks.find((h) => h.name === name)).filter((h): h is Hook => h !== undefined);
   const hooksFor = (stage: HookStage): Hook[] => hooks.filter((h) => h.stage === stage);
@@ -235,7 +256,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   await mkdir(dirname(worktree), { recursive: true });
   await excludeLocally(root, ['.warband/runs/']);
   await addWorktree(root, worktree, branch, base);
-  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base });
+  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base, skills: skillTexts.map((s) => ({ name: s.name, sha256: skillHash(s.text) })) });
 
   const ctx: PromptContext = {
     instructions: agent.description,

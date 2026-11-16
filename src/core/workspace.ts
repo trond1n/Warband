@@ -1,11 +1,15 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
-import { normalizeName } from './agents.ts';
-import type { AgentDefinition, Skill } from './agents.ts';
-import { HOOK_STAGES } from './hooks.ts';
-import type { Hook } from './hooks.ts';
+import { agentFromInput, checkAgent, normalizeName } from './agents.ts';
+import type { AgentDefinition, AgentInput, AgentProblem, Skill } from './agents.ts';
+import { checkHook, HOOK_STAGES } from './hooks.ts';
+import type { Hook, HookProblem, HookStage } from './hooks.ts';
 import { DEFAULT_PROTECTED, DEFAULT_TESTS } from './protected.ts';
+import { checkSkill, composeSkill, splitSkill } from './skills.ts';
+import type { SkillProblem } from './skills.ts';
 import type { ProtectedRules } from './protected.ts';
 import { KNOWN_RUNNER_IDS as RUNNER_IDS } from './runner.ts';
 
@@ -15,7 +19,7 @@ import { KNOWN_RUNNER_IDS as RUNNER_IDS } from './runner.ts';
  *
  *   .warband/agents/<name>.json   agent definitions
  *   .warband/skills/<name>.md     skills: front matter (name, description) + rules
- *   .warband/hooks.json           { "hooks": [ { name, description, run, stage } ] }
+ *   .warband/hooks.json           { "hooks": [ { name, description, run, stage, env?, reduce? } ] }
  *   .warband/protected.json       { "paths": [...], "tests": [...], "defaults": true }
  *
  * Nothing secret belongs here.
@@ -104,13 +108,34 @@ export async function saveAgent(root: string, agent: AgentDefinition): Promise<s
 }
 
 export async function loadHooks(root: string): Promise<Hook[]> {
-  let data: unknown;
+  return (await readHooks(root)).hooks;
+}
+
+export interface HooksSnapshot {
+  hooks: Hook[];
+  /** Hash of hooks.json, 'none' when there is none; pass it back to `saveHook` and `deleteHook`. */
+  version: string;
+}
+
+/** hooks.json with a version, so a save can tell that the file changed under it. */
+export async function readHooks(root: string): Promise<HooksSnapshot> {
+  let text: string;
   try {
-    data = await readJson(hooksFile(root));
+    text = await readFile(hooksFile(root), 'utf8');
   } catch (err) {
-    if (isMissing(err)) return [];
+    if (isMissing(err)) return { hooks: [], version: 'none' };
     throw err;
   }
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`${hooksFile(root)} is not valid JSON: ${(err as Error).message}`);
+  }
+  return { hooks: parseHooks(data, root), version: createHash('sha256').update(text).digest('hex').slice(0, 16) };
+}
+
+function parseHooks(data: unknown, root: string): Hook[] {
   const list = isObject(data) ? data['hooks'] : undefined;
   if (!Array.isArray(list)) throw new Error(`${hooksFile(root)}: expected { "hooks": [...] }`);
   return list.map((item, i) => {
@@ -163,9 +188,263 @@ export async function loadProtected(root: string): Promise<ProtectedRules> {
   };
 }
 
+const hooksText = (hooks: readonly Hook[]): string => `${JSON.stringify({ hooks }, null, 2)}\n`;
+
 export async function saveHooks(root: string, hooks: readonly Hook[]): Promise<void> {
   await mkdir(warbandDir(root), { recursive: true });
-  await writeFile(hooksFile(root), `${JSON.stringify({ hooks }, null, 2)}\n`);
+  await writeFile(hooksFile(root), hooksText(hooks));
+}
+
+/** What a person fills in for a hook: environment variables as rows, which may repeat or be blank. */
+export interface HookInput {
+  name: string;
+  description: string;
+  run: string;
+  stage: string;
+  env: readonly (readonly [string, string])[];
+  reduce: boolean;
+}
+
+/**
+ * The hook as `saveHooks` writes it, the same shape and key order as a hook
+ * made by `warband agent new`: no `env` when there are no variables, and
+ * `reduce` only when it is on. Rows with neither a name nor a value are
+ * dropped; a repeated name is a problem rather than a silent overwrite.
+ */
+export function hookFromInput(input: HookInput, workspace: string): { hook: Hook; problems: HookProblem[] } {
+  const rows = input.env.map(([k, v]) => [k.trim(), v] as const).filter(([k, v]) => k !== '' || v.trim() !== '');
+  const env: Record<string, string> = {};
+  const problems: HookProblem[] = [];
+  for (const [key, value] of rows) {
+    if (Object.hasOwn(env, key)) {
+      if (!problems.some((p) => p.key === key)) {
+        problems.push({ field: 'env', code: 'env-name-duplicate', key, message: `environment variable "${key}" is listed twice` });
+      }
+      continue;
+    }
+    env[key] = value;
+  }
+  const hook: Hook = {
+    name: normalizeName(input.name),
+    description: input.description.trim(),
+    run: input.run.trim(),
+    stage: input.stage as HookStage,
+    ...(rows.length > 0 ? { env } : {}),
+    ...(input.reduce ? { reduce: true } : {}),
+  };
+  return { hook, problems: [...checkHook(hook, workspace), ...problems] };
+}
+
+/** hooks.json changed on disk after the caller read it. */
+export class HooksChangedError extends Error {
+  readonly code = 'changed';
+  constructor() {
+    super('hooks.json changed on disk since it was read');
+  }
+}
+
+/** Thrown with the problems when the hook is not valid; nothing is written. */
+export class HookInvalidError extends Error {
+  readonly code = 'invalid';
+  readonly problems: HookProblem[];
+  constructor(problems: HookProblem[]) {
+    super(problems.map((p) => p.message).join('; '));
+    this.problems = problems;
+  }
+}
+
+/** The hook is used by agents, so it is not deleted. */
+export class HookInUseError extends Error {
+  readonly code = 'in-use';
+  readonly agents: string[];
+  constructor(name: string, agents: string[]) {
+    super(`hook "${name}" is used by ${agents.map((a) => `/${a}`).join(', ')}`);
+    this.agents = agents;
+  }
+}
+
+/** Names of the agents whose hook list has `name`. */
+export async function hookUsers(root: string, name: string): Promise<string[]> {
+  return (await listAgents(root)).filter((a) => a.hooks.includes(name)).map((a) => a.name);
+}
+
+/** A file to write, or to remove when `text` is null. */
+export interface FileChange {
+  path: string;
+  text: string | null;
+}
+
+/**
+ * Writes several files as one change: either all of them end up with their
+ * new content or all keep what they had. Every new text is written next to
+ * its file first; the swaps come after, and if one fails, the files already
+ * swapped get their old content back. Not proof against a power cut in the
+ * middle, but no error leaves agents pointing at a name that is gone.
+ */
+export async function commitFiles(changes: readonly FileChange[]): Promise<void> {
+  const before = await Promise.all(
+    changes.map(async (c) => {
+      try {
+        return await readFile(c.path, 'utf8');
+      } catch (err) {
+        if (isMissing(err)) return null;
+        throw err;
+      }
+    }),
+  );
+  const temp = (path: string): string => `${path}.warband-${process.pid}.tmp`;
+  const staged: string[] = [];
+  try {
+    for (const c of changes) {
+      if (c.text === null) continue;
+      await mkdir(dirname(c.path), { recursive: true });
+      await writeFile(temp(c.path), c.text, { flag: 'wx' });
+      staged.push(temp(c.path));
+    }
+  } catch (err) {
+    await Promise.all(staged.map((p) => rm(p, { force: true })));
+    throw err;
+  }
+  const done: number[] = [];
+  try {
+    for (const [i, c] of changes.entries()) {
+      if (c.text === null) await rm(c.path);
+      else await rename(temp(c.path), c.path);
+      done.push(i);
+    }
+  } catch (err) {
+    for (const i of done.reverse()) {
+      const c = changes[i] as FileChange;
+      const old = before[i];
+      if (old === null || old === undefined) await rm(c.path, { force: true });
+      else await writeFile(c.path, old);
+    }
+    await Promise.all(changes.map((c) => (c.text === null ? undefined : rm(temp(c.path), { force: true }))));
+    throw err;
+  }
+}
+
+/**
+ * `text` with `from` replaced by `to` inside the top-level "<key>": [...]
+ * list only, so a hand-formatted file keeps its layout byte for byte. The
+ * result is checked by parsing it; undefined when the text is laid out in a
+ * way this does not follow (the caller then writes the file anew).
+ */
+function replaceInList(text: string, key: string, from: string, to: string, expected: unknown): string | undefined {
+  const head = new RegExp(`"${key}"\\s*:\\s*\\[`, 'g');
+  for (const match of text.matchAll(head)) {
+    const start = (match.index ?? 0) + match[0].length;
+    // The end of the list: the first ] outside a string.
+    let end = start;
+    let inString = false;
+    for (; end < text.length; end++) {
+      const ch = text[end];
+      if (inString) {
+        if (ch === '\\') end++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === ']') break;
+    }
+    const list = text.slice(start, end).replaceAll(JSON.stringify(from), JSON.stringify(to));
+    const next = text.slice(0, start) + list + text.slice(end);
+    try {
+      if (JSON.stringify(JSON.parse(next)) === JSON.stringify(expected)) return next;
+    } catch {
+      // Not this occurrence; try the next one.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The agent files that list `from` under `kind`, rewritten to list `to`
+ * instead. Only the name changes: the rest of each file, unknown keys and
+ * layout included, stays as it was.
+ */
+async function renamedReferences(root: string, kind: 'hooks' | 'skills', from: string, to: string): Promise<{ agents: string[]; changes: FileChange[] }> {
+  let files: string[];
+  try {
+    files = await readdir(agentsDir(root));
+  } catch (err) {
+    if (isMissing(err)) return { agents: [], changes: [] };
+    throw err;
+  }
+  const agents: string[] = [];
+  const changes: FileChange[] = [];
+  for (const file of files.filter((f) => f.endsWith('.json')).sort()) {
+    const path = join(agentsDir(root), file);
+    const text = await readFile(path, 'utf8');
+    const data = await readJson(path);
+    const agent = parseAgent(data, path);
+    if (!agent[kind].includes(from)) continue;
+    const raw = data as Record<string, unknown>;
+    raw[kind] = (raw[kind] as string[]).map((n) => (n === from ? to : n));
+    agents.push(agent.name);
+    changes.push({ path, text: replaceInList(text, kind, from, to, raw) ?? `${JSON.stringify(raw, null, 2)}\n` });
+  }
+  return { agents, changes };
+}
+
+const sameSet = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((x) => b.includes(x));
+
+export interface SaveHookOptions {
+  /** The name the hook had when the form opened; absent for a new hook. */
+  original?: string;
+  /** From `readHooks`; a file that changed since is not written over. */
+  expectedVersion?: string;
+  /**
+   * The agents the person agreed to update when the hook is renamed. A
+   * rename of a used hook goes ahead only when this is exactly the list of
+   * agents that use it now.
+   */
+  renameAgents?: readonly string[];
+}
+
+/**
+ * Creates or updates one hook in hooks.json, keeping the others and their
+ * order. A new name must be free. Renaming a hook that agents use updates
+ * their hook lists in the same change, once the caller passes the list of
+ * those agents as confirmed; otherwise the problem names them.
+ */
+export async function saveHook(root: string, input: HookInput, options: SaveHookOptions = {}): Promise<HooksSnapshot & { hook: Hook }> {
+  const { hook, problems } = hookFromInput(input, root);
+  const { hooks, version } = await readHooks(root);
+  const { original } = options;
+  if (options.expectedVersion !== undefined && version !== options.expectedVersion) throw new HooksChangedError();
+  // The hook being edited was removed or renamed elsewhere.
+  if (original !== undefined && !hooks.some((h) => h.name === original)) throw new HooksChangedError();
+  if (hook.name !== original && hooks.some((h) => h.name === hook.name)) {
+    problems.unshift({ field: 'name', code: 'name-taken', message: `hook "${hook.name}" already exists` });
+  }
+  let references: FileChange[] = [];
+  if (original !== undefined && hook.name !== original && problems.length === 0) {
+    const { agents, changes } = await renamedReferences(root, 'hooks', original, hook.name);
+    if (agents.length > 0 && !sameSet(agents, options.renameAgents ?? [])) {
+      problems.unshift({
+        field: 'name',
+        code: 'rename-in-use',
+        agents,
+        message: `hook "${original}" is used by ${agents.map((a) => `/${a}`).join(', ')}; confirm renaming it there too`,
+      });
+    }
+    references = changes;
+  }
+  if (problems.length > 0) throw new HookInvalidError(problems);
+  const next = original === undefined ? [...hooks, hook] : hooks.map((h) => (h.name === original ? hook : h));
+  await mkdir(warbandDir(root), { recursive: true });
+  await commitFiles([{ path: hooksFile(root), text: hooksText(next) }, ...references]);
+  return { ...(await readHooks(root)), hook };
+}
+
+/** Removes one hook. Refused while an agent uses it, or when the file changed since `expectedVersion`. */
+export async function deleteHook(root: string, name: string, expectedVersion?: string): Promise<HooksSnapshot> {
+  const { hooks, version } = await readHooks(root);
+  if (expectedVersion !== undefined && version !== expectedVersion) throw new HooksChangedError();
+  if (!hooks.some((h) => h.name === name)) throw new HooksChangedError();
+  const agents = await hookUsers(root, name);
+  if (agents.length > 0) throw new HookInUseError(name, agents);
+  await saveHooks(root, hooks.filter((h) => h.name !== name));
+  return readHooks(root);
 }
 
 /** Reads `name` and `description` from simple `key: value` front matter. */
@@ -204,4 +483,209 @@ export async function createSkill(root: string, name: string, description: strin
   const body = `---\nname: ${name}\ndescription: ${description.replace(/\r?\n/g, ' ')}\n---\n\n<!-- Write the rules this skill stands for. The whole file is given to the agent. -->\n`;
   await writeFile(path, body, { flag: 'wx' });
   return { name, description, path };
+}
+
+/** A skill with its file text and the hash of that text. */
+export interface SkillFile extends Skill {
+  text: string;
+  /** sha256 of the file text; the same hash goes into run_started of every run that uses the skill. */
+  version: string;
+}
+
+/** sha256 of a skill's text, in hex. */
+export const skillHash = (text: string): string => createHash('sha256').update(text).digest('hex');
+
+/** The skills with their text, as `listSkills` finds them. */
+export async function readSkills(root: string): Promise<SkillFile[]> {
+  return Promise.all(
+    (await listSkills(root)).map(async (skill) => {
+      const text = await readFile(skill.path, 'utf8');
+      return { ...skill, text, version: skillHash(text) };
+    }),
+  );
+}
+
+/** What a person fills in for a skill: the front matter fields and the Markdown body. */
+export interface SkillInput {
+  name: string;
+  description: string;
+  body: string;
+}
+
+/** The skill file changed on disk, or is gone, since the caller read it. */
+export class SkillChangedError extends Error {
+  readonly code = 'changed';
+  constructor(name: string) {
+    super(`skill "${name}" changed on disk since it was read`);
+  }
+}
+
+export class SkillInvalidError extends Error {
+  readonly code = 'invalid';
+  readonly problems: SkillProblem[];
+  constructor(problems: SkillProblem[]) {
+    super(problems.map((p) => p.message).join('; '));
+    this.problems = problems;
+  }
+}
+
+export class SkillInUseError extends Error {
+  readonly code = 'in-use';
+  readonly agents: string[];
+  constructor(name: string, agents: string[]) {
+    super(`skill "${name}" is used by ${agents.map((a) => `/${a}`).join(', ')}`);
+    this.agents = agents;
+  }
+}
+
+/** Names of the agents whose skill list has `name`. */
+export async function skillUsers(root: string, name: string): Promise<string[]> {
+  return (await listAgents(root)).filter((a) => a.skills.includes(name)).map((a) => a.name);
+}
+
+export interface SaveSkillOptions {
+  /** The name the skill had when the form opened; absent for a new skill. */
+  original?: string;
+  /** The skill's `version` when the form opened; a file that changed since is not written over. */
+  expectedVersion?: string;
+  /** The agents the person agreed to update when a used skill is renamed; see `SaveHookOptions`. */
+  renameAgents?: readonly string[];
+}
+
+/**
+ * Creates or updates one skill file. Name and description go into the front
+ * matter in the format `parseFrontMatter` reads; other front matter lines of
+ * an existing file are kept. A renamed skill moves to <new name>.md, and the
+ * agents that list it are updated in the same change.
+ */
+export async function saveSkill(root: string, input: SkillInput, options: SaveSkillOptions = {}): Promise<SkillFile> {
+  const name = normalizeName(input.name);
+  const description = input.description.trim();
+  const problems = checkSkill(name, description);
+  const skills = await readSkills(root);
+  const { original } = options;
+  const current = original === undefined ? undefined : skills.find((s) => s.name === original);
+  if (original !== undefined && !current) throw new SkillChangedError(original);
+  if (current && options.expectedVersion !== undefined && current.version !== options.expectedVersion) throw new SkillChangedError(current.name);
+  const path = current && current.name === name ? current.path : join(skillsDir(root), `${name}.md`);
+  if (name !== original && problems.every((p) => p.field !== 'name')) {
+    if (skills.some((s) => s.name === name || (s.path === path && s !== current))) {
+      problems.unshift({ field: 'name', code: 'name-taken', message: `skill "${name}" already exists` });
+    } else if (existsSync(path) && path !== current?.path) {
+      problems.unshift({ field: 'name', code: 'name-taken', message: `${path} already exists` });
+    }
+  }
+  let references: FileChange[] = [];
+  if (original !== undefined && name !== original && problems.length === 0) {
+    const { agents, changes } = await renamedReferences(root, 'skills', original, name);
+    if (agents.length > 0 && !sameSet(agents, options.renameAgents ?? [])) {
+      problems.unshift({
+        field: 'name',
+        code: 'rename-in-use',
+        agents,
+        message: `skill "${original}" is used by ${agents.map((a) => `/${a}`).join(', ')}; confirm renaming it there too`,
+      });
+    }
+    references = changes;
+  }
+  if (problems.length > 0) throw new SkillInvalidError(problems);
+  const text = composeSkill(name, description, input.body, current ? splitSkill(current.text).extra : []);
+  await commitFiles([{ path, text }, ...(current && current.path !== path ? [{ path: current.path, text: null }] : []), ...references]);
+  return { name, description, path, text, version: skillHash(text) };
+}
+
+/** Removes one skill file. Refused while an agent lists it, or when the file changed since `expectedVersion`. */
+export async function deleteSkill(root: string, name: string, expectedVersion?: string): Promise<void> {
+  const current = (await readSkills(root)).find((s) => s.name === name);
+  if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) throw new SkillChangedError(name);
+  const agents = await skillUsers(root, name);
+  if (agents.length > 0) throw new SkillInUseError(name, agents);
+  await rm(current.path);
+}
+
+/** An agent with its file and the hash of the file text. */
+export interface AgentFile {
+  agent: AgentDefinition;
+  path: string;
+  /** sha256 of the file text; pass it back to `saveAgentInput` and `deleteAgent`. */
+  version: string;
+}
+
+/** The agents with their files and versions, as `listAgents` finds them. */
+export async function readAgents(root: string): Promise<AgentFile[]> {
+  let files: string[];
+  try {
+    files = await readdir(agentsDir(root));
+  } catch (err) {
+    if (isMissing(err)) return [];
+    throw err;
+  }
+  const agents: AgentFile[] = [];
+  for (const file of files.filter((f) => f.endsWith('.json')).sort()) {
+    const path = join(agentsDir(root), file);
+    const text = await readFile(path, 'utf8');
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      throw new Error(`${path} is not valid JSON: ${(err as Error).message}`);
+    }
+    agents.push({ agent: parseAgent(data, path), path, version: skillHash(text) });
+  }
+  return agents;
+}
+
+export class AgentChangedError extends Error {
+  readonly code = 'changed';
+  constructor(name: string) {
+    super(`agent "${name}" changed on disk since it was read`);
+  }
+}
+
+export class AgentInvalidError extends Error {
+  readonly code = 'invalid';
+  readonly problems: AgentProblem[];
+  constructor(problems: AgentProblem[]) {
+    super(problems.map((p) => p.message).join('; '));
+    this.problems = problems;
+  }
+}
+
+export interface SaveAgentOptions {
+  /** The name the agent had when the form opened; absent for a new agent. */
+  original?: string;
+  /** The agent's `version` when the form opened. */
+  expectedVersion?: string;
+}
+
+/**
+ * Creates or updates one agent from the form, validated like the wizard
+ * and the engine do it (`checkAgent`), and written by the same code as the
+ * wizard (`saveAgent`'s layout). A renamed agent moves to <new name>.json.
+ * Nothing refers to an agent by name except run logs, which keep the name
+ * the run had, so a rename or delete leaves them as they are.
+ */
+export async function saveAgentInput(root: string, input: AgentInput, options: SaveAgentOptions = {}): Promise<AgentFile> {
+  const agent = agentFromInput(input);
+  const [agents, skills, hooks] = await Promise.all([readAgents(root), listSkills(root), loadHooks(root)]);
+  const { original } = options;
+  const current = original === undefined ? undefined : agents.find((a) => a.agent.name === original);
+  if (original !== undefined && !current) throw new AgentChangedError(original);
+  if (current && options.expectedVersion !== undefined && current.version !== options.expectedVersion) throw new AgentChangedError(original ?? agent.name);
+  const problems = checkAgent(agent, { skills, hooks });
+  const path = join(agentsDir(root), `${agent.name}.json`);
+  if (agent.name !== original && !problems.some((p) => p.field === 'name') && (agents.some((a) => a.agent.name === agent.name) || existsSync(path))) {
+    problems.unshift({ field: 'name', code: 'name-taken', message: `agent "${agent.name}" already exists` });
+  }
+  if (problems.length > 0) throw new AgentInvalidError(problems);
+  const text = `${JSON.stringify(agent, null, 2)}\n`;
+  await commitFiles([{ path, text }, ...(current && current.path !== path ? [{ path: current.path, text: null }] : [])]);
+  return { agent, path, version: skillHash(text) };
+}
+
+/** Removes one agent file; its runs and their logs stay. */
+export async function deleteAgent(root: string, name: string, expectedVersion?: string): Promise<void> {
+  const current = (await readAgents(root)).find((a) => a.agent.name === name);
+  if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) throw new AgentChangedError(name);
+  await rm(current.path);
 }
