@@ -34,6 +34,13 @@ export interface ProviderSettings {
 
 export type Providers = Partial<Record<RunnerId, ProviderSettings>>;
 
+/**
+ * The models offered for a provider when an agent is made, in the window
+ * and in `warband agent new` alike: the list the person keeps on the
+ * Providers screen. Both also offer the CLI's default and a free entry.
+ */
+export const modelChoices = (providers: Providers, id: RunnerId): string[] => [...(providers[id]?.models ?? [])];
+
 export const APP_NAME = 'Warband';
 
 /** Folder of the machine settings, the same as the window's userData folder. */

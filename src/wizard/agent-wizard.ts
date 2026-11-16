@@ -240,14 +240,3 @@ export async function agentWizard(io: Prompter, env: WizardEnv): Promise<WizardR
   if (!(await confirm(io, '\nSave?', true))) return null;
   return { agent, newSkills, newHooks };
 }
-
-/** Model ids from the CLI's own `--help` examples. */
-export const CLAUDE_MODEL_ALIASES = ['opus', 'sonnet', 'fable'];
-
-/** Parses `agy models`: one `<id>\t<label>` per line after a header. */
-export function parseAgyModels(output: string): string[] {
-  return output
-    .split(/\r?\n/)
-    .map((line) => /^([a-z0-9][a-z0-9.\-]*)\t/.exec(line)?.[1])
-    .filter((id): id is string => id !== undefined);
-}

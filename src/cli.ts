@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 
 import type { HookStage } from './core/hooks.ts';
 import { HOOK_STAGES, runHook } from './core/hooks.ts';
-import { runProcess } from './core/proc.ts';
 import { which } from './core/which.ts';
 import type { RunnerId } from './core/runner.ts';
 import {
@@ -25,11 +24,11 @@ import {
 import { eventLog } from './engine/log.ts';
 import { runTask } from './engine/run.ts';
 import { renderEvent, terminalGate } from './engine/terminal.ts';
-import { configDir, loadProviders, providersFile } from './core/providers.ts';
+import { configDir, loadProviders, modelChoices, providersFile } from './core/providers.ts';
 import { createRunners, RUNNER_IDS } from './runners/registry.ts';
 import { driftMessage, versionDrift } from './core/runner.ts';
 import type { Runner } from './core/runner.ts';
-import { CLAUDE_MODEL_ALIASES, agentWizard, parseAgyModels } from './wizard/agent-wizard.ts';
+import { agentWizard } from './wizard/agent-wizard.ts';
 import type { Prompter } from './wizard/agent-wizard.ts';
 
 const HELP = `warband <command> [--dir <project>]
@@ -100,19 +99,6 @@ async function doctor(): Promise<number> {
   return rows.some((row) => row.installed === 'yes') ? 0 : 1;
 }
 
-/** Asks the CLI itself which models it offers. No model call is made. */
-async function modelsOf(runners: Record<RunnerId, Runner>, runner: RunnerId): Promise<string[]> {
-  if (runner === 'claude') return CLAUDE_MODEL_ALIASES;
-  if (runner === 'antigravity') {
-    const lines: string[] = [];
-    for await (const event of runProcess(runners.antigravity.binary, ['models'], { cwd: process.cwd(), timeoutMs: 30_000 })) {
-      if (event.type === 'stdout') lines.push(event.line);
-    }
-    return parseAgyModels(lines.join('\n'));
-  }
-  return [];
-}
-
 /**
  * Reads answers line by line. Lines are queued rather than read with
  * rl.question, which drops lines that arrive before the question is asked
@@ -169,7 +155,8 @@ function terminalPrompter(): Prompter & { close(): void; handOver(run: () => Pro
 
 async function agentNew(root: string): Promise<number> {
   console.log('Looking for installed CLIs...');
-  const all = await machineRunners();
+  const providers = await loadProviders(configDir());
+  const all = createRunners(providers);
   const detected = await Promise.all(RUNNER_IDS.map(async (id) => ({ id, found: (await all[id].detect()).found })));
   const runners = detected.filter((d) => d.found).map((d) => ({ id: d.id, displayName: all[d.id].displayName }));
   const [agents, skills, hooks] = await Promise.all([listAgents(root), listSkills(root), loadHooks(root)]);
@@ -179,7 +166,8 @@ async function agentNew(root: string): Promise<number> {
     const result = await agentWizard(io, {
       root,
       runners,
-      models: (runner) => modelsOf(all, runner),
+      // The list kept on the Providers screen, the same the window offers.
+      models: async (runner) => modelChoices(providers, runner),
       existingAgents: agents.map((a) => a.name),
       skills,
       hooks,

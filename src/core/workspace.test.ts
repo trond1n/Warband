@@ -420,3 +420,38 @@ test('a rename changes only the name in a hand-formatted agent file', async () =
   await saveSkill(root, skillInput({ name: 'canon' }), { original: 'teamer-canon', expectedVersion: canon!.version, renameAgents: ['dev'] });
   assert.equal(await readFile(file, 'utf8'), layout('canon'));
 });
+
+test('agents from the form: problems by field, a stale file, rename and delete leave run logs alone', async () => {
+  const { saveAgentInput, deleteAgent, readAgents, AgentChangedError, AgentInvalidError } = await import('./workspace.ts');
+  const root = await project();
+  await saveHooks(root, [{ name: 'unit', description: '', run: 'npm test', stage: 'checks' }]);
+  await createSkill(root, 'canon', 'rules');
+  const form = { name: 'dev', description: 'Writes code', skills: ['canon'], hooks: ['unit'], implementer: { runner: 'claude', model: 'sonnet' }, reviewer: { runner: 'claude', model: 'opus' } };
+
+  await assert.rejects(saveAgentInput(root, { ...form, name: 'Dev Ops', description: ' ', skills: ['gone'], reviewer: { runner: 'claude', model: '' } }), (err: unknown) => {
+    assert.ok(err instanceof AgentInvalidError);
+    assert.deepEqual(err.problems.map((p) => [p.field, p.code, p.item]), [
+      ['name', 'name-invalid', undefined],
+      ['description', 'description-empty', undefined],
+      ['skills', 'skill-unknown', 'gone'],
+      ['reviewer', 'same-cli-no-model', undefined],
+    ]);
+    return true;
+  });
+  const saved = await saveAgentInput(root, form);
+  await assert.rejects(saveAgentInput(root, form), (err: unknown) => err instanceof AgentInvalidError && err.problems[0]?.code === 'name-taken');
+  await assert.rejects(saveAgentInput(root, { ...form, description: 'x' }, { original: 'dev', expectedVersion: 'stale' }), AgentChangedError);
+
+  // A past run of /dev: its log lives under its run id and is not the agent's to change.
+  const log = join(warbandDir(root), 'runs', 'dev-20261116-0900', 'events.jsonl');
+  await mkdir(join(log, '..'), { recursive: true });
+  await writeFile(log, '{"type":"run_started","agent":"dev"}\n');
+
+  const renamed = await saveAgentInput(root, { ...form, name: 'developer' }, { original: 'dev', expectedVersion: saved.version });
+  assert.deepEqual((await readAgents(root)).map((a) => [a.agent.name, a.path]), [['developer', renamed.path]]);
+  assert.equal(await loadAgent(root, 'dev'), undefined);
+  await assert.rejects(deleteAgent(root, 'developer', 'stale'), AgentChangedError);
+  await deleteAgent(root, 'developer', renamed.version);
+  assert.deepEqual(await listAgents(root), []);
+  assert.equal(await readFile(log, 'utf8'), '{"type":"run_started","agent":"dev"}\n');
+});

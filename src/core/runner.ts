@@ -1,9 +1,11 @@
 import type { RawMapper } from './events.ts';
 import { runProcess } from './proc.ts';
 
-export const KNOWN_RUNNER_IDS = ['claude', 'codex', 'antigravity', 'kimi'] as const;
+import { KNOWN_RUNNER_IDS } from './runner-ids.ts';
+import type { RunnerId } from './runner-ids.ts';
 
-export type RunnerId = (typeof KNOWN_RUNNER_IDS)[number];
+export { KNOWN_RUNNER_IDS };
+export type { RunnerId };
 
 /**
  * What a CLI can do when it runs without a human at the terminal.
@@ -96,6 +98,13 @@ export function versionDrift(capabilities: Capabilities, installed: string | und
 }
 
 /** One line for the terminal and the run log, or undefined when there is nothing to say. */
+/**
+ * Why the engine refuses a CLI as implementer when its adapter is not
+ * verified. The window shows the same text next to the choice.
+ */
+export const unverifiedImplementerMessage = (name: string): string =>
+  `${name} has an unverified adapter, so Warband cannot tell what it will do when allowed to edit. See docs/runners.md, or pass --allow-unverified to accept that.`;
+
 export function driftMessage(name: string, id: string, drift: VersionDrift): string | undefined {
   const probe = `Run the probes to check it: npm run spike -- ${id}, or "Проверить" in the window.`;
   if (drift.kind === 'differs' && drift.failed) {

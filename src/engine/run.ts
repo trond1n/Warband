@@ -9,7 +9,7 @@ import type { AgentEvent } from '../core/events.ts';
 import { runHook } from '../core/hooks.ts';
 import type { Hook, HookResult, HookStage } from '../core/hooks.ts';
 import type { RoleAssignment } from '../core/roles.ts';
-import { driftMessage, versionDrift } from '../core/runner.ts';
+import { driftMessage, unverifiedImplementerMessage, versionDrift } from '../core/runner.ts';
 import type { Access, Runner, RunnerId } from '../core/runner.ts';
 import { advance, DEFAULT_ROUTE, initialState } from '../core/stages.ts';
 import type { Outcome, RouteOptions, RunState, Stage } from '../core/stages.ts';
@@ -218,10 +218,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     }
     if (!runner.capabilities.verified) {
       if (role === 'implementer' && !options.allowUnverified) {
-        throw new Error(
-          `${runner.displayName} has an unverified adapter, so Warband cannot tell what it will do when allowed to edit. ` +
-            'See docs/runners.md, or pass --allow-unverified to accept that.',
-        );
+        throw new Error(unverifiedImplementerMessage(runner.displayName));
       }
       report({ type: 'warning', message: `${runner.displayName} (${role}) has an unverified adapter, see docs/runners.md` });
     }

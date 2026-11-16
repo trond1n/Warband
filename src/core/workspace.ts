@@ -3,8 +3,8 @@ import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
-import { normalizeName } from './agents.ts';
-import type { AgentDefinition, Skill } from './agents.ts';
+import { agentFromInput, checkAgent, normalizeName } from './agents.ts';
+import type { AgentDefinition, AgentInput, AgentProblem, Skill } from './agents.ts';
 import { checkHook, HOOK_STAGES } from './hooks.ts';
 import type { Hook, HookProblem, HookStage } from './hooks.ts';
 import { DEFAULT_PROTECTED, DEFAULT_TESTS } from './protected.ts';
@@ -600,5 +600,92 @@ export async function deleteSkill(root: string, name: string, expectedVersion?: 
   if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) throw new SkillChangedError(name);
   const agents = await skillUsers(root, name);
   if (agents.length > 0) throw new SkillInUseError(name, agents);
+  await rm(current.path);
+}
+
+/** An agent with its file and the hash of the file text. */
+export interface AgentFile {
+  agent: AgentDefinition;
+  path: string;
+  /** sha256 of the file text; pass it back to `saveAgentInput` and `deleteAgent`. */
+  version: string;
+}
+
+/** The agents with their files and versions, as `listAgents` finds them. */
+export async function readAgents(root: string): Promise<AgentFile[]> {
+  let files: string[];
+  try {
+    files = await readdir(agentsDir(root));
+  } catch (err) {
+    if (isMissing(err)) return [];
+    throw err;
+  }
+  const agents: AgentFile[] = [];
+  for (const file of files.filter((f) => f.endsWith('.json')).sort()) {
+    const path = join(agentsDir(root), file);
+    const text = await readFile(path, 'utf8');
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      throw new Error(`${path} is not valid JSON: ${(err as Error).message}`);
+    }
+    agents.push({ agent: parseAgent(data, path), path, version: skillHash(text) });
+  }
+  return agents;
+}
+
+export class AgentChangedError extends Error {
+  readonly code = 'changed';
+  constructor(name: string) {
+    super(`agent "${name}" changed on disk since it was read`);
+  }
+}
+
+export class AgentInvalidError extends Error {
+  readonly code = 'invalid';
+  readonly problems: AgentProblem[];
+  constructor(problems: AgentProblem[]) {
+    super(problems.map((p) => p.message).join('; '));
+    this.problems = problems;
+  }
+}
+
+export interface SaveAgentOptions {
+  /** The name the agent had when the form opened; absent for a new agent. */
+  original?: string;
+  /** The agent's `version` when the form opened. */
+  expectedVersion?: string;
+}
+
+/**
+ * Creates or updates one agent from the form, validated like the wizard
+ * and the engine do it (`checkAgent`), and written by the same code as the
+ * wizard (`saveAgent`'s layout). A renamed agent moves to <new name>.json.
+ * Nothing refers to an agent by name except run logs, which keep the name
+ * the run had, so a rename or delete leaves them as they are.
+ */
+export async function saveAgentInput(root: string, input: AgentInput, options: SaveAgentOptions = {}): Promise<AgentFile> {
+  const agent = agentFromInput(input);
+  const [agents, skills, hooks] = await Promise.all([readAgents(root), listSkills(root), loadHooks(root)]);
+  const { original } = options;
+  const current = original === undefined ? undefined : agents.find((a) => a.agent.name === original);
+  if (original !== undefined && !current) throw new AgentChangedError(original);
+  if (current && options.expectedVersion !== undefined && current.version !== options.expectedVersion) throw new AgentChangedError(original ?? agent.name);
+  const problems = checkAgent(agent, { skills, hooks });
+  const path = join(agentsDir(root), `${agent.name}.json`);
+  if (agent.name !== original && !problems.some((p) => p.field === 'name') && (agents.some((a) => a.agent.name === agent.name) || existsSync(path))) {
+    problems.unshift({ field: 'name', code: 'name-taken', message: `agent "${agent.name}" already exists` });
+  }
+  if (problems.length > 0) throw new AgentInvalidError(problems);
+  const text = `${JSON.stringify(agent, null, 2)}\n`;
+  await commitFiles([{ path, text }, ...(current && current.path !== path ? [{ path: current.path, text: null }] : [])]);
+  return { agent, path, version: skillHash(text) };
+}
+
+/** Removes one agent file; its runs and their logs stay. */
+export async function deleteAgent(root: string, name: string, expectedVersion?: string): Promise<void> {
+  const current = (await readAgents(root)).find((a) => a.agent.name === name);
+  if (!current || (expectedVersion !== undefined && current.version !== expectedVersion)) throw new AgentChangedError(name);
   await rm(current.path);
 }
