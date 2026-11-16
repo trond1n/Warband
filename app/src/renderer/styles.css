@@ -1107,3 +1107,45 @@ input[type='text'].plain-font {
 .modal .muted.small {
   margin: 8px 0 0;
 }
+
+/* Skills: fields above, Markdown and its preview side by side */
+.split-form.wide {
+  max-width: none;
+}
+.skill-fields {
+  display: grid;
+  grid-template-columns: minmax(160px, 260px) minmax(0, 1fr);
+  gap: 12px;
+}
+.skill-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  margin: 12px 0;
+}
+.skill-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.monaco-host,
+.skill-preview {
+  height: 58vh;
+  min-height: 280px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.monaco-host {
+  overflow: hidden;
+}
+.skill-preview {
+  overflow: auto;
+  padding: 4px 14px;
+  background: var(--panel);
+}
+@media (max-width: 1100px) {
+  .skill-editor {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

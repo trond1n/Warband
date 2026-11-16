@@ -10,13 +10,14 @@ import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from 'electr
 import { configDir, providersFile } from '../../../src/core/providers.ts';
 import type { ProviderSettings } from '../../../src/core/providers.ts';
 import { NAME_PATTERN } from '../../../src/core/hooks.ts';
-import type { HookInput } from '../../../src/core/workspace.ts';
+import type { HookInput, SkillInput } from '../../../src/core/workspace.ts';
 import type { RunnerId } from '../../../src/core/runner.ts';
 import { which } from '../../../src/core/which.ts';
 import { git, repoRoot } from '../../../src/engine/git.ts';
 import { RUNNER_IDS } from '../../../src/runners/registry.ts';
 import type { AppState, GateDecision, TimedEvent, ToolInfo } from '../shared/api.ts';
 import { HookService } from './hooks.ts';
+import { SkillService } from './skills.ts';
 import { ProviderService } from './providers.ts';
 import { RunManager } from './runs.ts';
 
@@ -124,6 +125,23 @@ const short = (value: unknown, max: number, what: string): string => {
   return value;
 };
 
+/** A skill name, checked before it is used for anything. */
+function skillName(value: unknown): string {
+  if (typeof value !== 'string' || !NAME_PATTERN.test(value)) throw new Error('skill name expected');
+  return value;
+}
+
+/** Shape and size only; the name and description are validated by the core. */
+function skillInput(value: unknown): SkillInput {
+  const v = value as Record<string, unknown> | null;
+  if (!v || typeof v !== 'object') throw new Error('skill expected');
+  return {
+    name: short(v['name'], 100, 'skill name'),
+    description: short(v['description'], 2000, 'description'),
+    body: short(v['body'], 1_000_000, 'skill text'),
+  };
+}
+
 /** Agent names the person confirmed for a rename; each checked like any name before use. */
 function agentNames(value: unknown): string[] | undefined {
   if (value === undefined || value === null) return undefined;
@@ -198,6 +216,7 @@ const providers = new ProviderService({
 });
 
 const hooks = new HookService({ reslop: () => reslop });
+const skills = new SkillService();
 
 const manager = new RunManager({
   runners: providers.runners,
@@ -290,6 +309,15 @@ function registerIpc(): void {
   handle('trialRequest', async (root, input) => hooks.request(await knownProject(root), hookInput(input)));
   handle('trialHook', async (root, input, confirmed) => hooks.trial(await knownProject(root), hookInput(input), short(confirmed, 9000, 'confirmed command')));
   handle('cancelTrial', () => hooks.cancelTrial());
+  handle('skills', async (root) => {
+    const project = await knownProject(root);
+    watchWorkspace(project);
+    return skills.view(project);
+  });
+  handle('saveSkill', async (root, input, original, version, renameAgents) =>
+    skills.save(await knownProject(root), skillInput(input), original === null ? undefined : skillName(original), text(version, 'version'), agentNames(renameAgents)),
+  );
+  handle('deleteSkill', async (root, name, version) => skills.remove(await knownProject(root), skillName(name), text(version, 'version')));
   handle('openPath', async (path) => {
     const target = text(path, 'path');
     if (existsSync(target)) await shell.openPath(target);
@@ -334,10 +362,10 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-navigate', (event) => event.preventDefault());
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
-  // WARBAND_OPEN_RUN=<run id> opens that run's page at start; WARBAND_OPEN_VIEW=providers or hooks opens that screen.
+  // WARBAND_OPEN_RUN=<run id> opens that run's page at start; WARBAND_OPEN_VIEW=providers, hooks or skills opens that screen.
   const openRun = process.env['WARBAND_OPEN_RUN'];
   const openView = process.env['WARBAND_OPEN_VIEW'];
-  const hash = openRun ? `run=${openRun}` : openView === 'providers' || openView === 'hooks' ? `view=${openView}` : '';
+  const hash = openRun ? `run=${openRun}` : openView === 'providers' || openView === 'hooks' || openView === 'skills' ? `view=${openView}` : '';
   if (devUrl) await window.loadURL(hash ? `${devUrl}#${hash}` : devUrl);
   else await window.loadFile(join(here, '../renderer/index.html'), hash ? { hash } : {});
 

@@ -35,6 +35,9 @@ const api: WarbandApi = {
   trialRequest: call('trialRequest'),
   trialHook: call('trialHook'),
   cancelTrial: call('cancelTrial'),
+  skills: call('skills'),
+  saveSkill: call('saveSkill'),
+  deleteSkill: call('deleteSkill'),
   onWorkspaceChanged(listener) {
     const wrapped = (_: unknown, root: string): void => listener(root);
     ipcRenderer.on('warband:workspace-changed', wrapped);

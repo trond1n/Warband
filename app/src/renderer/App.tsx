@@ -8,8 +8,9 @@ import { HooksView } from './Hooks.tsx';
 import { ProvidersView } from './Providers.tsx';
 import type { LeaveGuard } from './Providers.tsx';
 import { RunView } from './RunView.tsx';
+import { SkillsView } from './Skills.tsx';
 
-type View = { kind: 'new' } | { kind: 'run'; runId: string } | { kind: 'project' } | { kind: 'providers' } | { kind: 'hooks' };
+type View = { kind: 'new' } | { kind: 'run'; runId: string } | { kind: 'project' } | { kind: 'providers' } | { kind: 'hooks' } | { kind: 'skills' };
 
 /** Events that change what the run list shows. */
 const LIST_EVENTS = new Set(['run_started', 'stage', 'gate_open', 'gate', 'run_finished']);
@@ -22,6 +23,7 @@ export function App(): ReactNode {
     const run = /^#run=(.+)$/.exec(window.location.hash)?.[1];
     if (run) return { kind: 'run', runId: decodeURIComponent(run) };
     if (window.location.hash === '#view=providers') return { kind: 'providers' };
+    if (window.location.hash === '#view=skills') return { kind: 'skills' };
     return window.location.hash === '#view=hooks' ? { kind: 'hooks' } : { kind: 'new' };
   });
   const [collapsed, setCollapsed] = useState(false);
@@ -101,6 +103,8 @@ export function App(): ReactNode {
           <Welcome onAdd={async () => setState(await window.warband.addProject())} />
         ) : view.kind === 'hooks' ? (
           <HooksView key={root} root={root} setGuard={setGuard} />
+        ) : view.kind === 'skills' ? (
+          <SkillsView key={root} root={root} setGuard={setGuard} />
         ) : view.kind === 'run' ? (
           <RunView key={view.runId} root={root} runId={view.runId} project={project} onChanged={refresh} />
         ) : view.kind === 'project' ? (
@@ -183,6 +187,9 @@ function Sidebar(props: {
       </button>
       <button className={`nav${view.kind === 'hooks' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'hooks' })} disabled={!state.current}>
         Хуки
+      </button>
+      <button className={`nav${view.kind === 'skills' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'skills' })} disabled={!state.current}>
+        Скиллы
       </button>
       <button className={`nav${view.kind === 'project' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'project' })} disabled={!state.current}>
         Проект: агенты и хуки

@@ -8,6 +8,8 @@ import type { AgentDefinition } from '../../../src/core/agents.ts';
 import type { Hook, HookProblem } from '../../../src/core/hooks.ts';
 import type { HookInput } from '../../../src/core/workspace.ts';
 import type { LogCleanup } from '../../../src/core/reslop-logs.ts';
+import type { SkillProblem } from '../../../src/core/skills.ts';
+import type { SkillInput } from '../../../src/core/workspace.ts';
 import type { EngineEvent, GateDecision } from '../../../src/engine/run.ts';
 import type { Finding } from '../../../src/engine/plan-file.ts';
 import type { ProtectedChange } from '../../../src/core/protected.ts';
@@ -24,6 +26,8 @@ export type {
   Hook,
   HookInput,
   HookProblem,
+  SkillInput,
+  SkillProblem,
   LocalCheck,
   LoginState,
   Mismatch,
@@ -171,6 +175,39 @@ export type DeleteHookResult =
   | { ok: false; changed: true }
   | { ok: false; error: string };
 
+/** One skill of the project as the "Скиллы" screen edits it. */
+export interface SkillInfo {
+  name: string;
+  description: string;
+  /** The Markdown after the front matter. */
+  body: string;
+  /** Front matter lines other than name and description, kept on save. */
+  extra: string[];
+  /** Path relative to the project, e.g. .warband/skills/canon.md. */
+  file: string;
+  /** sha256 of the file text: passed back on save and delete, and the hash run_started records. */
+  version: string;
+  /** Characters that go into a prompt. */
+  size: number;
+  /** Agents whose skill list has this skill; absent when the agent files could not be read. */
+  usedBy?: string[];
+}
+
+export interface SkillsView {
+  skills: SkillInfo[];
+  /** The skills folder could not be read. */
+  error?: string;
+  agentsError?: string;
+}
+
+export type SaveSkillResult =
+  | { ok: true; version: string; name: string }
+  | { ok: false; problems: SkillProblem[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+export type DeleteSkillResult = { ok: true } | { ok: false; usedBy: string[] } | { ok: false; changed: true } | { ok: false; error: string };
+
 /** What a trial run would execute, shown to the person before it runs. */
 export interface TrialRequest {
   /** The exact command line given to the shell. */
@@ -244,6 +281,14 @@ export interface WarbandApi {
   /** Runs the hook as the form has it in the project checkout; `confirmed` is the command the person accepted. */
   trialHook(root: string, input: HookInput, confirmed: string): Promise<TrialResult>;
   cancelTrial(): Promise<void>;
+  skills(root: string): Promise<SkillsView>;
+  /**
+   * `original`: the name the skill had when the form opened; null for a new one.
+   * `version`: the skill's version when the form opened (ignored for a new one).
+   * `renameAgents`: the agents the person agreed to update when a used skill is renamed.
+   */
+  saveSkill(root: string, input: SkillInput, original: string | null, version: string, renameAgents?: string[]): Promise<SaveSkillResult>;
+  deleteSkill(root: string, name: string, version: string): Promise<DeleteSkillResult>;
   /** Something in the project's .warband changed on disk (hooks.json, agents, skills). */
   onWorkspaceChanged(listener: (root: string) => void): () => void;
   /** Live events of every active run. Returns an unsubscribe function. */
