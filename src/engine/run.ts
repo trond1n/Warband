@@ -61,10 +61,12 @@ export type EngineEvent =
        * Absent in logs written before it was recorded.
        */
       skills?: { name: string; sha256: string }[];
+      /** Who played each role: the CLI, its model and installed version, or a scripted stand-in. Absent in older logs. */
+      roles?: Partial<Record<Role, RoleInfo>>;
     }
   | { type: 'warning'; message: string }
   | { type: 'stage'; stage: Stage; reworks: number }
-  | { type: 'agent_started'; stage: Stage; role: Role; runner: RunnerId; model?: string; access: Access }
+  | { type: 'agent_started'; stage: Stage; role: Role; runner: RunnerId; model?: string; access: Access; scripted?: true }
   | { type: 'agent'; stage: Stage; role: Role; event: AgentEvent }
   | { type: 'agent_finished'; stage: Stage; role: Role; ok: boolean; seconds: number }
   | { type: 'hook_started'; stage: HookStage; name: string; run: string }
@@ -79,6 +81,14 @@ export type EngineEvent =
   /** A review plan in .plan/ of the worktree (reslop format), from the reviewer or the person. */
   | { type: 'plan_written'; stage: Stage; name: string; source: 'reviewer' | 'person'; findings: number }
   | { type: 'run_finished'; state: RunState; branch?: string; commit?: string; worktree?: string; archive?: string };
+
+export interface RoleInfo {
+  runner: RunnerId;
+  model?: string;
+  version?: string;
+  /** A stand-in played the role instead of a model (the bench measuring another role). */
+  scripted?: true;
+}
 
 export interface GateDecision {
   outcome: 'ok' | 'changes_requested' | 'rejected';
@@ -123,6 +133,11 @@ export interface EngineOptions {
   signal?: AbortSignal;
   /** Path of reslop, false to never use it. Looked up on PATH when not given. */
   reslop?: string | false;
+  /**
+   * Scripted stand-ins that play a role instead of the agent's CLI, so a
+   * bench task can measure one role (the reviewer) on a fixed change.
+   */
+  standIns?: Partial<Record<Role, Runner>>;
 }
 
 export interface RunResult {
@@ -205,9 +220,19 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
     reviewer: agent.roles.reviewer,
   };
   const driftReported = new Set<RunnerId>();
+  const played: Partial<Record<Role, RoleInfo>> = {};
   for (const role of ['planner', 'implementer', 'reviewer'] as const) {
+    if (options.standIns?.[role]) {
+      played[role] = { runner: roles[role].runner, scripted: true };
+      continue;
+    }
     const runner = runners[roles[role].runner];
     const detection = await runner.detect();
+    played[role] = {
+      runner: runner.id,
+      ...(roles[role].model ? { model: roles[role].model } : {}),
+      ...(detection.version ? { version: detection.version } : {}),
+    };
     if (!detection.found) throw new Error(`${runner.displayName} (${role}) is not installed`);
     // A CLI that updated itself since its adapter was verified is reported once, not blocked,
     // unless the probes have passed on that version on this machine.
@@ -256,7 +281,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   await mkdir(dirname(worktree), { recursive: true });
   await excludeLocally(root, ['.warband/runs/']);
   await addWorktree(root, worktree, branch, base);
-  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base, skills: skillTexts.map((s) => ({ name: s.name, sha256: skillHash(s.text) })) });
+  report({ type: 'run_started', runId, agent: agent.name, task, worktree, branch, base, skills: skillTexts.map((s) => ({ name: s.name, sha256: skillHash(s.text) })), roles: played });
 
   const ctx: PromptContext = {
     instructions: agent.description,
@@ -267,7 +292,8 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
 
   async function step(stage: Stage, role: Role, prompt: string, access: Access, jsonSchema?: Record<string, unknown>): Promise<StepResult> {
     const assignment = roles[role];
-    const runner = runners[assignment.runner];
+    const standIn = options.standIns?.[role];
+    const runner = standIn ?? runners[assignment.runner];
     report({
       type: 'agent_started',
       stage,
@@ -275,6 +301,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
       runner: assignment.runner,
       access,
       ...(assignment.model ? { model: assignment.model } : {}),
+      ...(standIn ? { scripted: true as const } : {}),
     });
     const started = Date.now();
     const result: StepResult = { ok: false, text: '', deniedTools: [], errors: [] };

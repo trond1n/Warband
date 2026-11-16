@@ -162,6 +162,34 @@ test('happy path: every stage runs once and the result is committed on its own b
   );
 });
 
+test('a stand-in plays its role instead of the CLI; run_started records who played each role', async () => {
+  const root = await setup();
+  const { runners, calls } = fakeRunners({});
+  const detected = { ...runners, claude: { ...runners.claude, detect: async () => ({ found: true, version: '2.1.325' }) } };
+  const standIn = fakeRunners({}).runners.claude;
+  const events: EngineEvent[] = [];
+  const run = await runTask(
+    { root, runners: detected, gate: scriptedGate([], []), report: (e) => events.push(e), timeouts: { hook: 30_000 }, standIns: { implementer: standIn } },
+    agent,
+    'Create out.txt saying fixed',
+  );
+  assert.equal(run.state.status, 'done');
+  assert.deepEqual(calls.map((c) => c.stage), ['clarify', 'plan', 'review'], 'the implementer CLI was not called');
+  const started = events.find((e) => e.type === 'run_started');
+  assert.deepEqual(started?.type === 'run_started' && started.roles, {
+    planner: { runner: 'claude', model: 'opus', version: '2.1.325' },
+    implementer: { runner: 'claude', scripted: true },
+    reviewer: { runner: 'claude', model: 'opus', version: '2.1.325' },
+  });
+  const agents = events.filter((e) => e.type === 'agent_started');
+  assert.deepEqual(agents.map((e) => e.type === 'agent_started' && [e.role, e.scripted ?? false]), [
+    ['planner', false],
+    ['planner', false],
+    ['implementer', true],
+    ['reviewer', false],
+  ]);
+});
+
 test('a failing check sends the work back with the check output in the next prompt', async () => {
   const root = await setup();
   const { runners, calls } = fakeRunners({
