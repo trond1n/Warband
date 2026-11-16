@@ -325,9 +325,41 @@ export async function commitFiles(changes: readonly FileChange[]): Promise<void>
 }
 
 /**
+ * `text` with `from` replaced by `to` inside the top-level "<key>": [...]
+ * list only, so a hand-formatted file keeps its layout byte for byte. The
+ * result is checked by parsing it; undefined when the text is laid out in a
+ * way this does not follow (the caller then writes the file anew).
+ */
+function replaceInList(text: string, key: string, from: string, to: string, expected: unknown): string | undefined {
+  const head = new RegExp(`"${key}"\\s*:\\s*\\[`, 'g');
+  for (const match of text.matchAll(head)) {
+    const start = (match.index ?? 0) + match[0].length;
+    // The end of the list: the first ] outside a string.
+    let end = start;
+    let inString = false;
+    for (; end < text.length; end++) {
+      const ch = text[end];
+      if (inString) {
+        if (ch === '\\') end++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === ']') break;
+    }
+    const list = text.slice(start, end).replaceAll(JSON.stringify(from), JSON.stringify(to));
+    const next = text.slice(0, start) + list + text.slice(end);
+    try {
+      if (JSON.stringify(JSON.parse(next)) === JSON.stringify(expected)) return next;
+    } catch {
+      // Not this occurrence; try the next one.
+    }
+  }
+  return undefined;
+}
+
+/**
  * The agent files that list `from` under `kind`, rewritten to list `to`
- * instead. The rest of each file stays as it was: the JSON is edited, not
- * re-made from the parsed definition.
+ * instead. Only the name changes: the rest of each file, unknown keys and
+ * layout included, stays as it was.
  */
 async function renamedReferences(root: string, kind: 'hooks' | 'skills', from: string, to: string): Promise<{ agents: string[]; changes: FileChange[] }> {
   let files: string[];
@@ -341,13 +373,14 @@ async function renamedReferences(root: string, kind: 'hooks' | 'skills', from: s
   const changes: FileChange[] = [];
   for (const file of files.filter((f) => f.endsWith('.json')).sort()) {
     const path = join(agentsDir(root), file);
+    const text = await readFile(path, 'utf8');
     const data = await readJson(path);
     const agent = parseAgent(data, path);
     if (!agent[kind].includes(from)) continue;
     const raw = data as Record<string, unknown>;
     raw[kind] = (raw[kind] as string[]).map((n) => (n === from ? to : n));
     agents.push(agent.name);
-    changes.push({ path, text: `${JSON.stringify(raw, null, 2)}\n` });
+    changes.push({ path, text: replaceInList(text, kind, from, to, raw) ?? `${JSON.stringify(raw, null, 2)}\n` });
   }
   return { agents, changes };
 }

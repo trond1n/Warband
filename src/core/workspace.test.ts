@@ -394,3 +394,29 @@ test('renaming a used skill moves the file and updates the agents in one change;
   await deleteSkill(root, 'spare', spare.version);
   assert.deepEqual((await listSkills(root)).map((s) => s.name), ['code-canon']);
 });
+
+test('a rename changes only the name in a hand-formatted agent file', async () => {
+  const root = await project();
+  await saveSkill(root, skillInput({ name: 'teamer-canon' }));
+  await saveSkill(root, skillInput({ name: 'teamer-dev' }));
+  await mkdir(join(warbandDir(root), 'agents'), { recursive: true });
+  const file = join(warbandDir(root), 'agents', 'dev.json');
+  const layout = (canon: string): string =>
+    [
+      '{',
+      '  "name": "dev",',
+      '  "description": "Writes code; \\"teamer-canon\\" in the text is not a reference",',
+      `  "skills": ["${canon}", "teamer-dev"],`,
+      '  "hooks": ["teamer-canon-check"],',
+      '  "roles": {',
+      '    "implementer": { "runner": "claude", "model": "sonnet" },',
+      '    "reviewer": { "runner": "claude", "model": "opus" }',
+      '  }',
+      '}',
+      '',
+    ].join('\r\n');
+  await writeFile(file, layout('teamer-canon'));
+  const [canon] = await readSkills(root);
+  await saveSkill(root, skillInput({ name: 'canon' }), { original: 'teamer-canon', expectedVersion: canon!.version, renameAgents: ['dev'] });
+  assert.equal(await readFile(file, 'utf8'), layout('canon'));
+});
