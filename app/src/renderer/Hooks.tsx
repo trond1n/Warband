@@ -6,6 +6,7 @@ import { useConfirm } from './Dialog.tsx';
 import { blankForm, copyName, formOf, inputOf, isDirty, normalName, problemText, secondsText, STAGES, usedByText } from './hooks-model.ts';
 import type { HookForm } from './hooks-model.ts';
 import type { LeaveGuard } from './Providers.tsx';
+import type { ForAgent } from './Skills.tsx';
 
 /*
  * The project's hooks: the list on the left, one hook's form on the right.
@@ -17,7 +18,7 @@ import type { LeaveGuard } from './Providers.tsx';
 /** What the form is showing: nothing, a saved hook by its name, or a new one. */
 type Mode = { kind: 'none' } | { kind: 'edit'; name: string } | { kind: 'new' };
 
-export function HooksView({ root, setGuard }: { root: string; setGuard(guard: LeaveGuard | null): void }): ReactNode {
+export function HooksView({ root, setGuard, forAgent }: { root: string; setGuard(guard: LeaveGuard | null): void; forAgent?: ForAgent | undefined }): ReactNode {
   const [view, setView] = useState<View>();
   const [mode, setMode] = useState<Mode>({ kind: 'none' });
   const [form, setForm] = useState<HookForm>(blankForm);
@@ -54,7 +55,9 @@ export function HooksView({ root, setGuard }: { root: string; setGuard(guard: Le
   }, []);
 
   useEffect(() => {
-    void window.warband.hooks(root).then((next) => apply(next, next.hooks[0] ? { kind: 'edit', name: next.hooks[0].hook.name } : { kind: 'none' }));
+    void window.warband.hooks(root).then((next) => apply(next, forAgent ? { kind: 'new' } : next.hooks[0] ? { kind: 'edit', name: next.hooks[0].hook.name } : { kind: 'none' }));
+    // forAgent is fixed for the life of the screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root, apply]);
 
   const modeRef = useRef(mode);
@@ -135,6 +138,7 @@ export function HooksView({ root, setGuard }: { root: string; setGuard(guard: Le
     }
     setBusy(false);
     if (result.ok) {
+      if (forAgent && original === null) return forAgent.onDone(result.name);
       // Our own write must not look like someone else's change when the watcher reports it.
       versionRef.current = result.version;
       apply(await window.warband.hooks(root), { kind: 'edit', name: result.name });
@@ -285,6 +289,14 @@ export function HooksView({ root, setGuard }: { root: string; setGuard(guard: Le
       </section>
 
       <section className="split-form" aria-label="Хук">
+        {forAgent && (
+          <div className="callout">
+            Новый хук для формы агента. После сохранения вы вернётесь в форму, хук будет выбран, введённое там сохранено.{' '}
+            <button className="link" onClick={() => void (async () => (!dirty || (await askLeave())) && forAgent.onDone())()}>
+              Вернуться без создания
+            </button>
+          </div>
+        )}
         {view.error && (
           <div className="callout warn" role="alert">
             Не удалось прочитать .warband/hooks.json: {view.error}

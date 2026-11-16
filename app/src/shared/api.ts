@@ -4,7 +4,7 @@
  * preload script. Engine types are imported as types only, so the renderer
  * bundle does not pull in engine code.
  */
-import type { AgentDefinition } from '../../../src/core/agents.ts';
+import type { AgentDefinition, AgentInput, AgentProblem } from '../../../src/core/agents.ts';
 import type { Hook, HookProblem } from '../../../src/core/hooks.ts';
 import type { HookInput } from '../../../src/core/workspace.ts';
 import type { LogCleanup } from '../../../src/core/reslop-logs.ts';
@@ -19,6 +19,8 @@ import type { Mismatch, ProbeResult } from '../../../scripts/spike/probes.ts';
 
 export type {
   AgentDefinition,
+  AgentInput,
+  AgentProblem,
   Capabilities,
   EngineEvent,
   Finding,
@@ -175,6 +177,49 @@ export type DeleteHookResult =
   | { ok: false; changed: true }
   | { ok: false; error: string };
 
+/** A provider as the agent form offers it. */
+export interface ProviderChoice {
+  id: RunnerId;
+  name: string;
+  found: boolean;
+  version?: string;
+  verified: boolean;
+  /** The engine's text when it refuses this CLI as implementer for an unverified adapter. */
+  unverifiedMessage: string;
+  drift: VersionDrift;
+  /** The models kept on the Providers screen; the wizard offers the same. */
+  models: string[];
+}
+
+export interface AgentInfo {
+  agent: AgentDefinition;
+  /** sha256 of the file, passed back on save and delete. */
+  version: string;
+  /** e.g. .warband/agents/dev.json */
+  file: string;
+}
+
+export interface AgentsView {
+  agents: AgentInfo[];
+  skills: { name: string; description: string; size: number }[];
+  hooks: Hook[];
+  providers: ProviderChoice[];
+  /** The agent files could not be read. */
+  error?: string;
+  /** Skills or hooks could not be read. */
+  partsError?: string;
+  /** providers.json could not be read; the model lists are empty. */
+  providersError?: string;
+}
+
+export type SaveAgentResult =
+  | { ok: true; version: string; name: string }
+  | { ok: false; problems: AgentProblem[] }
+  | { ok: false; changed: true }
+  | { ok: false; error: string };
+
+export type DeleteAgentResult = { ok: true } | { ok: false; changed: true } | { ok: false; error: string };
+
 /** One skill of the project as the "Скиллы" screen edits it. */
 export interface SkillInfo {
   name: string;
@@ -281,6 +326,10 @@ export interface WarbandApi {
   /** Runs the hook as the form has it in the project checkout; `confirmed` is the command the person accepted. */
   trialHook(root: string, input: HookInput, confirmed: string): Promise<TrialResult>;
   cancelTrial(): Promise<void>;
+  agents(root: string): Promise<AgentsView>;
+  /** `original`: the agent's name when the form opened, null for a new one; `version`: its version then. */
+  saveAgent(root: string, input: AgentInput, original: string | null, version: string): Promise<SaveAgentResult>;
+  deleteAgent(root: string, name: string, version: string): Promise<DeleteAgentResult>;
   skills(root: string): Promise<SkillsView>;
   /**
    * `original`: the name the skill had when the form opened; null for a new one.

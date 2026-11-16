@@ -11,12 +11,14 @@ import { configDir, providersFile } from '../../../src/core/providers.ts';
 import type { ProviderSettings } from '../../../src/core/providers.ts';
 import { NAME_PATTERN } from '../../../src/core/hooks.ts';
 import type { HookInput, SkillInput } from '../../../src/core/workspace.ts';
+import type { AgentInput } from '../../../src/core/agents.ts';
 import type { RunnerId } from '../../../src/core/runner.ts';
 import { which } from '../../../src/core/which.ts';
 import { git, repoRoot } from '../../../src/engine/git.ts';
 import { RUNNER_IDS } from '../../../src/runners/registry.ts';
 import type { AppState, GateDecision, TimedEvent, ToolInfo } from '../shared/api.ts';
 import { HookService } from './hooks.ts';
+import { AgentService } from './agents.ts';
 import { SkillService } from './skills.ts';
 import { ProviderService } from './providers.ts';
 import { RunManager } from './runs.ts';
@@ -125,6 +127,35 @@ const short = (value: unknown, max: number, what: string): string => {
   return value;
 };
 
+/** An agent name, checked before it is used for anything. */
+function agentName(value: unknown): string {
+  if (typeof value !== 'string' || !NAME_PATTERN.test(value)) throw new Error('agent name expected');
+  return value;
+}
+
+/** Shape and size only; names, roles and references are validated by the core. */
+function agentInput(value: unknown): AgentInput {
+  const v = value as Record<string, unknown> | null;
+  if (!v || typeof v !== 'object') throw new Error('agent expected');
+  const names = (list: unknown, what: string): string[] => {
+    if (!Array.isArray(list) || list.length > 200) throw new Error(`${what} expected`);
+    return list.map((n) => short(n, 100, what));
+  };
+  const role = (r: unknown, what: string): { runner: string; model: string } => {
+    const x = r as Record<string, unknown> | null;
+    if (!x || typeof x !== 'object') throw new Error(`${what} expected`);
+    return { runner: short(x['runner'], 40, `${what} runner`), model: short(x['model'], 200, `${what} model`) };
+  };
+  return {
+    name: short(v['name'], 100, 'agent name'),
+    description: short(v['description'], 20_000, 'description'),
+    skills: names(v['skills'], 'skill names'),
+    hooks: names(v['hooks'], 'hook names'),
+    implementer: role(v['implementer'], 'implementer'),
+    reviewer: role(v['reviewer'], 'reviewer'),
+  };
+}
+
 /** A skill name, checked before it is used for anything. */
 function skillName(value: unknown): string {
   if (typeof value !== 'string' || !NAME_PATTERN.test(value)) throw new Error('skill name expected');
@@ -217,6 +248,7 @@ const providers = new ProviderService({
 
 const hooks = new HookService({ reslop: () => reslop });
 const skills = new SkillService();
+const agents = new AgentService({ providers: () => providers.load(), runners: () => providers.runners });
 
 const manager = new RunManager({
   runners: providers.runners,
@@ -309,6 +341,15 @@ function registerIpc(): void {
   handle('trialRequest', async (root, input) => hooks.request(await knownProject(root), hookInput(input)));
   handle('trialHook', async (root, input, confirmed) => hooks.trial(await knownProject(root), hookInput(input), short(confirmed, 9000, 'confirmed command')));
   handle('cancelTrial', () => hooks.cancelTrial());
+  handle('agents', async (root) => {
+    const project = await knownProject(root);
+    watchWorkspace(project);
+    return agents.view(project);
+  });
+  handle('saveAgent', async (root, input, original, version) =>
+    agents.save(await knownProject(root), agentInput(input), original === null ? undefined : agentName(original), text(version, 'version')),
+  );
+  handle('deleteAgent', async (root, name, version) => agents.remove(await knownProject(root), agentName(name), text(version, 'version')));
   handle('skills', async (root) => {
     const project = await knownProject(root);
     watchWorkspace(project);
@@ -362,10 +403,10 @@ async function createWindow(): Promise<void> {
   window.webContents.on('will-navigate', (event) => event.preventDefault());
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
-  // WARBAND_OPEN_RUN=<run id> opens that run's page at start; WARBAND_OPEN_VIEW=providers, hooks or skills opens that screen.
+  // WARBAND_OPEN_RUN=<run id> opens that run's page at start; WARBAND_OPEN_VIEW=providers, hooks, skills or agents opens that screen.
   const openRun = process.env['WARBAND_OPEN_RUN'];
   const openView = process.env['WARBAND_OPEN_VIEW'];
-  const hash = openRun ? `run=${openRun}` : openView === 'providers' || openView === 'hooks' || openView === 'skills' ? `view=${openView}` : '';
+  const hash = openRun ? `run=${openRun}` : openView === 'providers' || openView === 'hooks' || openView === 'skills' || openView === 'agents' ? `view=${openView}` : '';
   if (devUrl) await window.loadURL(hash ? `${devUrl}#${hash}` : devUrl);
   else await window.loadFile(join(here, '../renderer/index.html'), hash ? { hash } : {});
 

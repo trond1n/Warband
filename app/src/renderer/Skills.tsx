@@ -21,7 +21,12 @@ type Mode = { kind: 'none' } | { kind: 'edit'; name: string } | { kind: 'new' };
 
 const dark = (): boolean => window.matchMedia('(prefers-color-scheme: dark)').matches;
 
-export function SkillsView({ root, setGuard }: { root: string; setGuard(guard: LeaveGuard | null): void }): ReactNode {
+/** Making one for an agent's form: start on a new one and go back to the form once it is saved. */
+export interface ForAgent {
+  onDone(created?: string): void;
+}
+
+export function SkillsView({ root, setGuard, forAgent }: { root: string; setGuard(guard: LeaveGuard | null): void; forAgent?: ForAgent | undefined }): ReactNode {
   const [view, setView] = useState<View>();
   const [mode, setMode] = useState<Mode>({ kind: 'none' });
   const [form, setForm] = useState<SkillForm>(blankForm);
@@ -59,7 +64,9 @@ export function SkillsView({ root, setGuard }: { root: string; setGuard(guard: L
   }, []);
 
   useEffect(() => {
-    void window.warband.skills(root).then((next) => apply(next, next.skills[0] ? { kind: 'edit', name: next.skills[0].name } : { kind: 'none' }));
+    void window.warband.skills(root).then((next) => apply(next, forAgent ? { kind: 'new' } : next.skills[0] ? { kind: 'edit', name: next.skills[0].name } : { kind: 'none' }));
+    // forAgent is fixed for the life of the screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [root, apply]);
 
   const reload = useCallback(async () => {
@@ -142,6 +149,7 @@ export function SkillsView({ root, setGuard }: { root: string; setGuard(guard: L
     }
     setBusy(false);
     if (result.ok) {
+      if (forAgent && original === null) return forAgent.onDone(result.name);
       // Our own write must not look like someone else's change when the watcher reports it.
       openVersion.current = result.version;
       modeRef.current = { kind: 'edit', name: result.name };
@@ -244,6 +252,14 @@ export function SkillsView({ root, setGuard }: { root: string; setGuard(guard: L
       </section>
 
       <section className="split-form wide" aria-label="Скилл">
+        {forAgent && (
+          <div className="callout">
+            Новый скилл для формы агента. После сохранения вы вернётесь в форму, скилл будет выбран, введённое там сохранено.{' '}
+            <button className="link" onClick={() => void (async () => (!dirty || (await askLeave())) && forAgent.onDone())()}>
+              Вернуться без создания
+            </button>
+          </div>
+        )}
         {view.error && (
           <div className="callout warn" role="alert">
             Не удалось прочитать .warband/skills/: {view.error}

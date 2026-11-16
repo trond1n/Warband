@@ -1149,3 +1149,59 @@ input[type='text'].plain-font {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Agents: picks with sizes, hooks by stage, the two roles side by side */
+.pick .check {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: baseline;
+}
+.pick .size {
+  white-space: nowrap;
+}
+.pick-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.stage-group + .stage-group {
+  margin-top: 8px;
+}
+.roles {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+.role select,
+.role input[type='text'] {
+  width: 100%;
+}
+.mark {
+  font-size: 12.5px;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  border-radius: var(--radius);
+}
+.mark.missing {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.mark.unverified,
+.mark.drift {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.summary {
+  margin: 14px 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--panel);
+}
+@media (max-width: 900px) {
+  .roles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -7,10 +7,19 @@ import { dayLabel, STAGE_LABEL, STATUS_LABEL } from './model.ts';
 import { HooksView } from './Hooks.tsx';
 import { ProvidersView } from './Providers.tsx';
 import type { LeaveGuard } from './Providers.tsx';
+import { AgentsView } from './Agents.tsx';
+import type { AgentDraft } from './agents-model.ts';
 import { RunView } from './RunView.tsx';
 import { SkillsView } from './Skills.tsx';
 
-type View = { kind: 'new' } | { kind: 'run'; runId: string } | { kind: 'project' } | { kind: 'providers' } | { kind: 'hooks' } | { kind: 'skills' };
+type View =
+  | { kind: 'new'; agent?: string }
+  | { kind: 'run'; runId: string }
+  | { kind: 'providers' }
+  | { kind: 'agents' }
+  /** `forAgent`: making one for the agent form, which comes back after. */
+  | { kind: 'hooks'; forAgent?: boolean }
+  | { kind: 'skills'; forAgent?: boolean };
 
 /** Events that change what the run list shows. */
 const LIST_EVENTS = new Set(['run_started', 'stage', 'gate_open', 'gate', 'run_finished']);
@@ -24,10 +33,13 @@ export function App(): ReactNode {
     if (run) return { kind: 'run', runId: decodeURIComponent(run) };
     if (window.location.hash === '#view=providers') return { kind: 'providers' };
     if (window.location.hash === '#view=skills') return { kind: 'skills' };
+    if (window.location.hash === '#view=agents') return { kind: 'agents' };
     return window.location.hash === '#view=hooks' ? { kind: 'hooks' } : { kind: 'new' };
   });
   const [collapsed, setCollapsed] = useState(false);
   const root = state?.current;
+  /** The agent form, kept while the person makes a skill or hook for it. */
+  const [agentDraft, setAgentDraft] = useState<AgentDraft | null>(null);
 
   // A settings form registers a guard; leaving it with unsaved edits asks first.
   const guard = useRef<LeaveGuard | null>(null);
@@ -61,8 +73,18 @@ export function App(): ReactNode {
   useEffect(() => {
     setProject(undefined);
     setRuns([]);
+    setAgentDraft(null);
     void refresh();
   }, [refresh]);
+
+  // Agents, skills or hooks changed on disk: the task screen lists agents.
+  useEffect(() => window.warband.onWorkspaceChanged((changed) => changed === root && void refresh()), [refresh, root]);
+
+  /** Back to the agent form from making a skill or hook; `created`: its name, if it was saved. */
+  const backToAgent = (kind: 'skill' | 'hook') => (created?: string) => {
+    setAgentDraft((d) => (d ? { ...d, ...(created ? { created: { kind, name: created } } : {}) } : d));
+    setView({ kind: 'agents' });
+  };
 
   useEffect(
     () =>
@@ -101,16 +123,31 @@ export function App(): ReactNode {
           <ProvidersView setGuard={setGuard} onSaved={async () => setState(await window.warband.state())} />
         ) : !root ? (
           <Welcome onAdd={async () => setState(await window.warband.addProject())} />
+        ) : view.kind === 'agents' ? (
+          <AgentsView
+            key={root}
+            root={root}
+            setGuard={setGuard}
+            restore={agentDraft}
+            onRestored={() => setAgentDraft(null)}
+            onCreate={(kind, draft) => {
+              // The draft is kept, so leaving the form here loses nothing: no "unsaved edits" question.
+              setAgentDraft(draft);
+              setView({ kind: kind === 'skill' ? 'skills' : 'hooks', forAgent: true });
+            }}
+            onRun={(agent) => setView({ kind: 'new', agent })}
+            onChanged={refresh}
+          />
         ) : view.kind === 'hooks' ? (
-          <HooksView key={root} root={root} setGuard={setGuard} />
+          <HooksView key={`${root}-${String(view.forAgent)}`} root={root} setGuard={setGuard} forAgent={view.forAgent ? { onDone: backToAgent('hook') } : undefined} />
         ) : view.kind === 'skills' ? (
-          <SkillsView key={root} root={root} setGuard={setGuard} />
+          <SkillsView key={`${root}-${String(view.forAgent)}`} root={root} setGuard={setGuard} forAgent={view.forAgent ? { onDone: backToAgent('skill') } : undefined} />
         ) : view.kind === 'run' ? (
           <RunView key={view.runId} root={root} runId={view.runId} project={project} onChanged={refresh} />
-        ) : view.kind === 'project' ? (
-          <ProjectView project={project} />
         ) : (
           <NewTask
+            key={view.agent ?? ''}
+            initialAgent={view.agent}
             project={project}
             tools={state.tools}
             onStarted={(runId) => {
@@ -185,14 +222,14 @@ function Sidebar(props: {
       <button className={`nav${view.kind === 'providers' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'providers' })}>
         Провайдеры
       </button>
-      <button className={`nav${view.kind === 'hooks' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'hooks' })} disabled={!state.current}>
-        Хуки
+      <button className={`nav${view.kind === 'agents' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'agents' })} disabled={!state.current}>
+        Агенты
       </button>
       <button className={`nav${view.kind === 'skills' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'skills' })} disabled={!state.current}>
         Скиллы
       </button>
-      <button className={`nav${view.kind === 'project' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'project' })} disabled={!state.current}>
-        Проект: агенты и хуки
+      <button className={`nav${view.kind === 'hooks' ? ' active' : ''}`} onClick={() => void props.onView({ kind: 'hooks' })} disabled={!state.current}>
+        Хуки
       </button>
 
       <nav className="runs" aria-label="Прогоны">
@@ -253,8 +290,19 @@ function Welcome({ onAdd }: { onAdd(): void }): ReactNode {
   );
 }
 
-function NewTask({ project, tools, onStarted }: { project: ProjectInfo | undefined; tools: AppState['tools']; onStarted(runId: string): void }): ReactNode {
-  const [agent, setAgent] = useState('');
+function NewTask({
+  project,
+  tools,
+  initialAgent,
+  onStarted,
+}: {
+  project: ProjectInfo | undefined;
+  tools: AppState['tools'];
+  /** Picked when the screen opens, as from "Запустить задачу с этим агентом". */
+  initialAgent?: string | undefined;
+  onStarted(runId: string): void;
+}): ReactNode {
+  const [agent, setAgent] = useState(initialAgent ?? '');
   const [task, setTask] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -290,7 +338,7 @@ function NewTask({ project, tools, onStarted }: { project: ProjectInfo | undefin
 
       {agents.length === 0 ? (
         <div className="callout">
-          В проекте нет агентов. Создайте агента в терминале: <code>warband agent new</code> (в папке проекта), затем вернитесь сюда.
+          В проекте нет агентов. Создайте агента на экране «Агенты» в разделе «Настройка» или в терминале: <code>warband agent new</code>.
         </div>
       ) : (
         <>
@@ -351,82 +399,3 @@ function NewTask({ project, tools, onStarted }: { project: ProjectInfo | undefin
   );
 }
 
-function ProjectView({ project }: { project: ProjectInfo | undefined }): ReactNode {
-  if (!project) return <div className="page muted">Загрузка проекта…</div>;
-  return (
-    <div className="page">
-      <h1>{project.name}</h1>
-      <p className="muted">
-        {project.root}
-        {project.branch ? ` · ветка ${project.branch}` : ''}
-      </p>
-      <div className="row">
-        <button className="button" onClick={() => void window.warband.openPath(`${project.root}/.warband`)}>
-          Открыть .warband
-        </button>
-        <span className="muted small">Агенты создаются командой warband agent new; файлы можно править руками.</span>
-      </div>
-
-      <h2>Агенты</h2>
-      <div className="cards">
-        {project.agents.map((a) => (
-          <article key={a.name} className="card">
-            <h3>/{a.name}</h3>
-            <p>{a.description}</p>
-            <dl>
-              <dt>Пишет</dt>
-              <dd>
-                {a.roles.implementer.runner} / {a.roles.implementer.model ?? 'по умолчанию'}
-              </dd>
-              <dt>Проверяет</dt>
-              <dd>
-                {a.roles.reviewer.runner} / {a.roles.reviewer.model ?? 'по умолчанию'}
-              </dd>
-              <dt>Скиллы</dt>
-              <dd>{a.skills.join(', ') || '—'}</dd>
-              <dt>Хуки</dt>
-              <dd>{a.hooks.join(', ') || '—'}</dd>
-            </dl>
-          </article>
-        ))}
-        {project.agents.length === 0 && <p className="muted">Агентов нет.</p>}
-      </div>
-
-      <h2>Скиллы</h2>
-      <ul className="plain">
-        {project.skills.map((s) => (
-          <li key={s.name}>
-            <strong>{s.name}</strong> <span className="muted">{s.description}</span>
-          </li>
-        ))}
-        {project.skills.length === 0 && <li className="muted">Скиллов нет.</li>}
-      </ul>
-
-      <h2>Хуки</h2>
-      <table className="table">
-        <thead>
-          <tr>
-            <th>Имя</th>
-            <th>Когда</th>
-            <th>Команда</th>
-            <th>Особенности</th>
-          </tr>
-        </thead>
-        <tbody>
-          {project.hooks.map((h) => (
-            <tr key={h.name}>
-              <td>{h.name}</td>
-              <td>{STAGE_LABEL[h.stage] ?? h.stage}</td>
-              <td>
-                <code>{h.run}</code>
-              </td>
-              <td className="muted small">
-                {[h.reduce ? 'через reslop' : '', ...Object.entries(h.env ?? {}).map(([k, v]) => `${k}=${v}`)].filter(Boolean).join(', ') || '—'}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
