@@ -68,6 +68,7 @@ export function parseAgent(value: unknown, where: string): AgentDefinition {
     skills,
     hooks,
     roles: {
+      ...(roles['planner'] === undefined ? {} : { planner: parseRole(roles['planner'], `${where} roles.planner`) }),
       implementer: parseRole(roles['implementer'], `${where} roles.implementer`),
       reviewer: parseRole(roles['reviewer'], `${where} roles.reviewer`),
     },

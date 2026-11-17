@@ -135,6 +135,28 @@ async function setup(hooks: Hook[] = [contentHook]): Promise<string> {
 const go = (root: string, runners: Record<RunnerId, Runner>, gate: HumanGate, events: EngineEvent[] = []) =>
   runTask({ root, runners, gate, report: (e) => events.push(e), timeouts: { hook: 30_000 } }, agent, 'Create out.txt saying fixed');
 
+test('an explicit planner handles clarification and planning independently of the reviewer', async () => {
+  const root = await repo();
+  const { runners, calls } = fakeRunners({});
+  const run = await runTask({ root, runners, gate: scriptedGate([], []), report: () => {} }, {
+    ...agent,
+    skills: [],
+    hooks: [],
+    roles: {
+      planner: { runner: 'codex', model: 'planner-model' },
+      reviewer: { runner: 'codex', model: 'reviewer-model' },
+      implementer: { runner: 'antigravity', model: 'gemini-model' },
+    },
+  }, 'Create out.txt saying fixed');
+  assert.equal(run.state.status, 'done');
+  assert.deepEqual(calls.map(({ stage, req }) => [stage, req.model]), [
+    ['clarify', 'planner-model'],
+    ['plan', 'planner-model'],
+    ['implement', 'gemini-model'],
+    ['review', 'reviewer-model'],
+  ]);
+});
+
 test('happy path: every stage runs once and the result is committed on its own branch', async () => {
   const root = await setup();
   const { runners, calls } = fakeRunners({});

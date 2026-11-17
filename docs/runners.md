@@ -5,7 +5,7 @@ What Warband assumes about each CLI when nobody is at the terminal. A row is **c
 | CLI | Binary | Headless call | Output | Own sandbox | Approvals when headless | Status |
 | --- | --- | --- | --- | --- | --- | --- |
 | Claude Code | `claude` | `-p --output-format stream-json --verbose --permission-mode manual|acceptEdits --permission-prompts none --tools <per role> --strict-mcp-config [--json-schema]`, prompt on stdin | JSON lines, key `type` | Permission rules (agent level) | Denied at once, run continues | **Verified** on 2.1.325, Windows, subscription login |
-| Codex | `codex` | `exec --json <prompt>` | JSON lines | OS-level | Unknown | Unverified, not installed on the probe machine |
+| Codex | `codex` | `-a never exec --json --ephemeral --sandbox read-only\|workspace-write [--output-schema <file>] -`, prompt on stdin | JSON lines, key `type` | OS-level | Configured to deny | Read-only smoke test on Windows, implementer unverified |
 | Antigravity | `agy` | `-p <prompt> --output-format stream-json` | JSON lines, key `event` | Unknown, `--sandbox` exists | Unknown | Output confirmed on 1.5.9, no successful run yet |
 | Kimi Code | `kimi` | `-p <prompt> --output-format stream-json` | JSON lines | None | Reported to run everything | Unverified, not installed on the probe machine |
 | GLM | `claude` | Same as Claude Code | Same | Same | Same | No adapter, see below |
@@ -79,7 +79,9 @@ Not checked:
 
 ## Codex
 
-Not installed on the probe machine (`codex` not on PATH). Nothing about it is confirmed. Still to check: the exact JSON flag for the installed version, the event schema, and which sandbox and approval settings apply to `exec`.
+On Windows, Codex CLI **0.169.0-alpha.11.1** on PATH responded to a read-only headless call using an existing ChatGPT login. Warband sends prompts on stdin and gives Codex the stage's response schema via a temporary file when requested.
+
+Warband uses `read-only` for clarification, planning, and review. Edit requests use `workspace-write`. The implementer remains unverified because the edit policy and tool isolation have not been validated. Codex can use a shell within its sandbox.
 
 ## Antigravity
 

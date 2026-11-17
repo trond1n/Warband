@@ -366,6 +366,32 @@ export function AgentsView({ root, setGuard, restore, onRestored, onCreate, onRu
                 problems={at('reviewer')}
                 onChange={(reviewer) => setForm({ ...form, reviewer })}
               />
+              <label className="field">
+                <span>Постановщик задач</span>
+                <select
+                  value={form.planner ? 'separate' : 'reviewer'}
+                  onChange={(e) => {
+                    if (e.target.value === 'separate') setForm({ ...form, planner: { ...form.reviewer } });
+                    else {
+                      const { planner, ...rest } = form;
+                      setForm(rest);
+                    }
+                  }}
+                >
+                  <option value="reviewer">Назначить ревьюера</option>
+                  <option value="separate">Выбрать отдельно</option>
+                </select>
+              </label>
+              {form.planner && (
+                <RolePicker
+                  title="Постановщик задач (уточняет и планирует)"
+                  role="planner"
+                  value={form.planner}
+                  providers={view.providers}
+                  problems={at('planner')}
+                  onChange={(planner) => setForm({ ...form, planner })}
+                />
+              )}
             </div>
 
             <p className="summary" role="status">
@@ -428,7 +454,7 @@ const OTHER = '__other';
 /** Provider, then a model from the Providers screen's list, the CLI's default, or one typed in. */
 function RolePicker(props: {
   title: string;
-  role: 'implementer' | 'reviewer';
+  role: 'planner' | 'implementer' | 'reviewer';
   value: RoleForm;
   providers: ProviderChoice[];
   problems: AgentProblem[];

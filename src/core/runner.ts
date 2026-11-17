@@ -1,3 +1,6 @@
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { RawMapper } from './events.ts';
 import { runProcess } from './proc.ts';
 
@@ -187,7 +190,9 @@ export interface CliRunnerSpec {
   capabilities: Capabilities;
   versionArgs: readonly string[];
   /** Builds argv for one headless run. */
-  buildArgs(request: RunRequest): string[];
+  buildArgs(request: RunRequest, schemaFile?: string): string[];
+  schemaOnDisk?: boolean;
+  launch?: (binary: string, args: readonly string[]) => { binary: string; args: readonly string[] };
   /**
    * Send the prompt on stdin instead of argv. buildArgs must then leave it
    * out. Only for CLIs where this has been checked.
@@ -233,6 +238,7 @@ async function askLogin(binary: string, login: NonNullable<CliRunnerSpec['login'
 
 /** A runner that launches an installed CLI as a child process. */
 export function cliRunner(spec: CliRunnerSpec): Runner {
+  const launch = (args: readonly string[]) => spec.launch?.(spec.binary, args) ?? { binary: spec.binary, args };
   return {
     id: spec.id,
     displayName: spec.displayName,
@@ -242,7 +248,8 @@ export function cliRunner(spec: CliRunnerSpec): Runner {
 
     async detect(): Promise<Detection> {
       let output = '';
-      for await (const event of runProcess(spec.binary, spec.versionArgs, {
+      const command = launch(spec.versionArgs);
+      for await (const event of runProcess(command.binary, command.args, {
         cwd: process.cwd(),
         timeoutMs: 15_000,
       })) {
@@ -265,24 +272,46 @@ export function cliRunner(spec: CliRunnerSpec): Runner {
         ...(request.signal ? { signal: request.signal } : {}),
         ...(spec.promptOnStdin ? { input: request.prompt } : {}),
       };
-      for await (const event of runProcess(spec.binary, spec.buildArgs(request), procOptions)) {
-        switch (event.type) {
-          case 'stdout': {
-            const parsed = parseLine(event.line);
-            if (parsed) yield parsed;
-            break;
-          }
-          case 'stderr':
-            yield { type: 'stderr', text: event.line };
-            break;
-          case 'spawn_error':
-            yield { type: 'error', message: event.message };
-            break;
-          case 'exit':
-            yield { type: 'done', exitCode: event.code, timedOut: event.timedOut };
-            break;
+      let schemaDir: string | undefined;
+      try {
+        let schemaFile: string | undefined;
+        if (spec.schemaOnDisk && request.jsonSchema) {
+          schemaDir = await mkdtemp(join(tmpdir(), 'warband-schema-'));
+          schemaFile = join(schemaDir, 'response.json');
+          await writeFile(schemaFile, JSON.stringify(request.jsonSchema));
         }
+        const command = launch(spec.buildArgs(request, schemaFile));
+        yield* stream(command.binary, command.args, procOptions);
+      } catch (error) {
+        yield { type: 'error', message: String(error) };
+      } finally {
+        if (schemaDir) await rm(schemaDir, { recursive: true, force: true });
       }
     },
   };
+}
+
+async function* stream(
+  binary: string,
+  args: readonly string[],
+  options: Parameters<typeof runProcess>[2],
+): AsyncGenerator<RunnerEvent> {
+  for await (const event of runProcess(binary, args, options)) {
+    switch (event.type) {
+      case 'stdout': {
+        const parsed = parseLine(event.line);
+        if (parsed) yield parsed;
+        break;
+      }
+      case 'stderr':
+        yield { type: 'stderr', text: event.line };
+        break;
+      case 'spawn_error':
+        yield { type: 'error', message: event.message };
+        break;
+      case 'exit':
+        yield { type: 'done', exitCode: event.code, timedOut: event.timedOut };
+        break;
+    }
+  }
 }

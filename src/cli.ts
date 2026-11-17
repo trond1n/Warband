@@ -204,6 +204,7 @@ async function agentList(root: string): Promise<number> {
       hooks: a.hooks.join(', '),
       implementer: `${a.roles.implementer.runner}/${a.roles.implementer.model ?? 'default'}`,
       reviewer: `${a.roles.reviewer.runner}/${a.roles.reviewer.model ?? 'default'}`,
+      planner: a.roles.planner ? `${a.roles.planner.runner}/${a.roles.planner.model ?? 'default'}` : 'reviewer',
     })),
   );
   return 0;

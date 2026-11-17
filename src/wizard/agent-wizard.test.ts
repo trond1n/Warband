@@ -47,6 +47,7 @@ test('a full run: new skill, existing and new hook, cheap writer and strong revi
     '1', 'n', 'unit', 'npm test', '2', '', // hooks: pick lint, add unit (finish stage), done
     '1', '2', // implementer: Claude Code, sonnet
     '1', '1', // reviewer: Claude Code, opus
+    '', // planner: reviewer
     '', // save: default yes
   ]);
   const result = await agentWizard(io, env());
@@ -73,10 +74,12 @@ test('the same CLI and model for both roles is refused and both roles are asked 
     '1', '2', // reviewer: claude / sonnet -> refused
     '1', '2', // implementer again: claude / sonnet
     '2', '1', // reviewer again: antigravity / gemini
+    'y', '1', '1', // planner: Claude Code, opus
     'y',
   ]);
   const result = await agentWizard(io, env());
   assert.deepEqual(result?.agent.roles.reviewer, { runner: 'antigravity', model: 'gemini-4-argon-medium' });
+  assert.deepEqual(result?.agent.roles.planner, { runner: 'claude', model: 'opus' });
   assert.ok(io.said.some((line) => /must not be the same CLI and model/.test(line)));
 });
 
@@ -89,7 +92,7 @@ test('the CLI default model on both sides of one CLI is refused, because the dif
     '1', '4', 'claude-opus-5-5', // reviewer: typed id -> still refused, implementer has no model
     '1', '2', // implementer: claude / sonnet
     '1', '4', 'claude-opus-5-5', // reviewer: claude / typed id
-    'y',
+    '', 'y',
   ]);
   const result = await agentWizard(io, env());
   assert.deepEqual(result?.agent.roles, {
@@ -106,7 +109,7 @@ test('bad answers are asked again instead of being accepted', async () => {
     'n', 'nuke', 'rm -rf /', '1', 'npm test', '1', '', // hook denied by policy, then a safe command
     'x', '1', '1', // not a number, then claude / opus
     '1', '2',
-    'maybe', 'y',
+    '', 'maybe', 'y',
   ]);
   const result = await agentWizard(io, env());
   assert.equal(result?.agent.name, 'test');
@@ -120,7 +123,7 @@ test('an existing agent is replaced only after confirmation, and declining to sa
     'test', 'n', 'test2', // exists, do not replace, pick another name
     'Write tests.', '', ...NO_SKILLS, ...NO_HOOKS,
     '1', '1', '1', '2',
-    'n', // do not save
+    '', 'n', // do not save
   ]);
   assert.equal(await agentWizard(io, env({ existingAgents: ['test'] })), null);
   assert.equal(io.left(), 0);
@@ -143,7 +146,7 @@ test('the window and the wizard make the same agent file from the same answers',
     '2', '1', '', // hooks: unit, then lint
     '1', '2', // implementer: claude / sonnet
     '1', '4', 'claude-opus-5-5', // reviewer: claude / a typed id
-    'y',
+    '', 'y',
   ]);
   const skills = [
     { name: 'style', description: 'Style', path: 'style.md' },
