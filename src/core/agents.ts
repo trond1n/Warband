@@ -1,7 +1,7 @@
 import type { Hook } from './hooks.ts';
 import { NAME_PATTERN } from './names.ts';
 import { checkRoles } from './roles.ts';
-import type { RoleAssignment, RoleProblemCode } from './roles.ts';
+import type { Role, RoleAssignment, RoleProblemCode } from './roles.ts';
 import { KNOWN_RUNNER_IDS } from './runner-ids.ts';
 
 /**
@@ -18,6 +18,7 @@ export interface AgentDefinition {
   /** Hook names, see `Hook`. */
   hooks: string[];
   roles: {
+    planner?: RoleAssignment;
     implementer: RoleAssignment;
     reviewer: RoleAssignment;
   };
@@ -64,7 +65,7 @@ export type AgentProblemCode =
  * shows its own text by `code`.
  */
 export interface AgentProblem {
-  field: 'name' | 'description' | 'skills' | 'hooks' | 'implementer' | 'reviewer';
+  field: 'name' | 'description' | 'skills' | 'hooks' | Role;
   code: AgentProblemCode;
   message: string;
   /** skill-unknown, hook-unknown: the name that is not in the project. */
@@ -83,9 +84,10 @@ export function checkAgent(agent: AgentDefinition, known: KnownParts): AgentProb
   for (const hook of agent.hooks) {
     if (!known.hooks.some((h) => h.name === hook)) problems.push({ field: 'hooks', code: 'hook-unknown', item: hook, message: `unknown hook "${hook}"` });
   }
-  for (const role of ['implementer', 'reviewer'] as const) {
-    const runner = agent.roles[role].runner;
-    if (!(KNOWN_RUNNER_IDS as readonly string[]).includes(runner)) {
+  for (const role of ['planner', 'implementer', 'reviewer'] as const) {
+    const runner = agent.roles[role]?.runner;
+    if (runner === undefined && role === 'planner') continue;
+    if (runner === undefined || !(KNOWN_RUNNER_IDS as readonly string[]).includes(runner)) {
       problems.push({ field: role, code: 'runner-unknown', message: `${role}: runner must be one of ${KNOWN_RUNNER_IDS.join(', ')}` });
     }
   }
@@ -103,6 +105,7 @@ export interface AgentInput {
   description: string;
   skills: readonly string[];
   hooks: readonly string[];
+  planner?: { runner: string; model: string };
   implementer: { runner: string; model: string };
   reviewer: { runner: string; model: string };
 }
@@ -133,6 +136,10 @@ export function agentFromInput(input: AgentInput): AgentDefinition {
     description: normalizeDescription(input.description),
     skills: [...new Set(input.skills)],
     hooks: [...new Set(input.hooks)],
-    roles: { implementer: role(input.implementer), reviewer: role(input.reviewer) },
+    roles: {
+      ...(input.planner ? { planner: role(input.planner) } : {}),
+      implementer: role(input.implementer),
+      reviewer: role(input.reviewer),
+    },
   };
 }

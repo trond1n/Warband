@@ -219,7 +219,13 @@ export async function agentWizard(io: Prompter, env: WizardEnv): Promise<WizardR
     reviewer = await askRole(io, env, 'Reviewer');
   }
 
-  const agent: AgentDefinition = { name, description, skills, hooks, roles: { implementer, reviewer } };
+  const planner = await confirm(io, 'Choose a separate planner for clarification and planning?', false)
+    ? await askRole(io, env, 'Planner')
+    : undefined;
+  const agent: AgentDefinition = {
+    name, description, skills, hooks,
+    roles: { ...(planner ? { planner } : {}), implementer, reviewer },
+  };
   const problems = validateAgent(agent, {
     skills: [...env.skills, ...newSkills],
     hooks: [...env.hooks, ...newHooks],
@@ -236,6 +242,7 @@ export async function agentWizard(io: Prompter, env: WizardEnv): Promise<WizardR
   io.say(`  hooks:       ${hooks.join(', ') || 'none'}`);
   io.say(`  implementer: ${role(implementer)}`);
   io.say(`  reviewer:    ${role(reviewer)}`);
+  io.say(`  planner:     ${planner ? role(planner) : 'reviewer'}`);
 
   if (!(await confirm(io, '\nSave?', true))) return null;
   return { agent, newSkills, newHooks };

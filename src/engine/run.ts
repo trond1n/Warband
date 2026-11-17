@@ -200,7 +200,7 @@ export async function runTask(options: EngineOptions, agent: AgentDefinition, ta
   if (problems.length > 0) throw new Error(`agent /${agent.name} is not valid:\n  ${problems.join('\n  ')}`);
 
   const roles: Record<Role, RoleAssignment> = {
-    planner: agent.roles.reviewer,
+    planner: agent.roles.planner ?? agent.roles.reviewer,
     implementer: agent.roles.implementer,
     reviewer: agent.roles.reviewer,
   };

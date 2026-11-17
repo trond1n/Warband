@@ -21,6 +21,7 @@ export interface AgentForm {
   /** In the order they were picked, as the wizard keeps them. */
   skills: string[];
   hooks: string[];
+  planner?: RoleForm;
   implementer: RoleForm;
   reviewer: RoleForm;
 }
@@ -51,6 +52,7 @@ export const formOf = (agent: AgentDefinition): AgentForm => ({
   description: agent.description,
   skills: [...agent.skills],
   hooks: [...agent.hooks],
+  ...(agent.roles.planner ? { planner: { runner: agent.roles.planner.runner, model: agent.roles.planner.model ?? '' } } : {}),
   implementer: { runner: agent.roles.implementer.runner, model: agent.roles.implementer.model ?? '' },
   reviewer: { runner: agent.roles.reviewer.runner, model: agent.roles.reviewer.model ?? '' },
 });
@@ -105,16 +107,17 @@ export function summary(form: AgentForm, providers: readonly ProviderChoice[], h
     return names.length > 0 ? [`${WHEN[stage]} — ${list(names)}`] : [];
   });
   const checks = parts.length > 0 ? `проверки: ${parts.join('; ')}` : 'проверок кодом нет, только ревью';
-  return `Пишет ${roleLabel(providers, form.implementer)}, проверяет ${roleLabel(providers, form.reviewer)}; ${checks}.`;
+  const planner = form.planner ? `Планирует ${roleLabel(providers, form.planner)}. ` : '';
+  return `${planner}Пишет ${roleLabel(providers, form.implementer)}, проверяет ${roleLabel(providers, form.reviewer)}; ${checks}.`;
 }
 
 /** Marks for a provider in a role: not installed, the engine's refusal for an unverified implementer, another version. */
-export function providerMarks(provider: ProviderChoice | undefined, role: 'implementer' | 'reviewer'): { kind: 'missing' | 'unverified' | 'drift'; text: string }[] {
+export function providerMarks(provider: ProviderChoice | undefined, role: 'planner' | 'implementer' | 'reviewer'): { kind: 'missing' | 'unverified' | 'drift'; text: string }[] {
   if (!provider) return [];
   const marks: { kind: 'missing' | 'unverified' | 'drift'; text: string }[] = [];
   if (!provider.found) marks.push({ kind: 'missing', text: `${provider.name} не установлен на этой машине: прогон не начнётся. Путь к CLI задаётся на экране «Провайдеры».` });
   if (!provider.verified && role === 'implementer') marks.push({ kind: 'unverified', text: provider.unverifiedMessage });
-  if (!provider.verified && role === 'reviewer') marks.push({ kind: 'unverified', text: 'Адаптер не подтверждён: ревьюером можно, движок предупредит об этом в журнале.' });
+  if (!provider.verified && role !== 'implementer') marks.push({ kind: 'unverified', text: 'Адаптер не подтверждён. Движок запишет предупреждение в журнал.' });
   const drift = provider.found ? driftText(provider.drift) : undefined;
   if (drift) marks.push({ kind: 'drift', text: drift });
   return marks;

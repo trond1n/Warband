@@ -32,6 +32,8 @@ A CLI that is not on PATH can be given a full path, and each CLI can have a list
 
 `warband doctor`, `warband run`, `warband agent new`, `npm run spike` and the window all launch the binary set there. The `models` list is what the agent form and `warband agent new` offer when a model is picked. The file holds no keys or logins. Edit it in the window (**Провайдеры**) or by hand. A new CLI cannot be added there: it needs an adapter in code, see [Adding a runner](docs/runners.md#adding-a-runner).
 
+Antigravity runs through the `withproxy` function in `~/.bashrc`. On Windows Warband uses Git Bash from the default Git installation. Set `WARBAND_WITHPROXY_BASH` to the path to Bash if it is installed elsewhere.
+
 ## Agents
 
 An agent is a reusable task such as `/test`:
@@ -39,7 +41,7 @@ An agent is a reusable task such as `/test`:
 - what it does, which becomes its instructions;
 - the **skills** it follows: Markdown rules such as a coding canon, given to the agent in its prompt;
 - the **hooks** that check its work: shell commands run by Warband itself, not by a model, so they cost no tokens. A `setup` hook runs once in the new worktree before any agent, for example `pnpm install`: ignored folders such as `node_modules` are not in a fresh worktree, and a failure stops the run. A `checks` hook runs after implement, and a failure sends the work back. A `finish` hook runs right before the commit. `{warband}` in a command is replaced with the absolute path of the project's `.warband` folder, so a script kept there works from the worktree: `node "{warband}/hooks/lint-changed.mjs"`;
-- the **implementer** and **reviewer**, each a CLI and a model. They must differ, for example a cheaper model writes and a stronger one reviews.
+- the **planner**, **implementer** and **reviewer**, each a CLI and a model. The planner handles clarification and planning and defaults to the reviewer. The implementer and reviewer must differ, for example a cheaper model writes and a stronger one reviews.
 
 ```sh
 # from the project you want to work on
@@ -56,7 +58,7 @@ Everything is saved as plain files in `<project>/.warband/`: `agents/<name>.json
 `warband run <agent> "<task>"` takes the task through every stage. The project must be a git repository with at least one commit.
 
 0. **setup**: the worktree is created from the last commit in a per-user folder outside the project (`%LOCALAPPDATA%\Warband\wt` on Windows, see [ADR-0003](docs/adr/0003-worktrees-outside-the-project.md); `WARBAND_WORKTREES` overrides it), and the agent's `setup` hooks run in it.
-1. **clarify** and **plan**: the reviewer's model reads the code without changing it, may ask you questions, and writes a plan.
+1. **clarify** and **plan**: the planner's model reads the code without changing it, may ask you questions, and writes a plan.
 2. **approve**: you accept the plan, ask for changes (it is re-planned), or reject it.
 3. **implement**: the implementer's model works in that worktree, on a new branch `warband/<run>`. It may edit files but has no shell.
 4. **checks**: the agent's `checks` hooks run in the worktree. A failure goes back to implement, with the output.

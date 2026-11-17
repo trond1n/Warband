@@ -1,0 +1,11 @@
+{
+  "name": "gemini",
+  "description": "Уточнять требования, планировать, реализовывать и проверять изменения в Warband.",
+  "skills": [],
+  "hooks": [],
+  "roles": {
+    "planner": { "runner": "codex" },
+    "implementer": { "runner": "antigravity", "model": "gemini-4-argon-medium" },
+    "reviewer": { "runner": "codex" }
+  }
+}

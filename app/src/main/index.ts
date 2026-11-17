@@ -153,6 +153,7 @@ function agentInput(value: unknown): AgentInput {
     description: short(v['description'], 20_000, 'description'),
     skills: names(v['skills'], 'skill names'),
     hooks: names(v['hooks'], 'hook names'),
+    ...(v['planner'] === undefined ? {} : { planner: role(v['planner'], 'planner') }),
     implementer: role(v['implementer'], 'implementer'),
     reviewer: role(v['reviewer'], 'reviewer'),
   };

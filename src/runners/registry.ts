@@ -1,11 +1,27 @@
+import { join } from 'node:path';
 import { configDir, loadProviders } from '../core/providers.ts';
 import type { Providers } from '../core/providers.ts';
 import { cliRunner, KNOWN_RUNNER_IDS } from '../core/runner.ts';
 import type { CliRunnerSpec, LoginState, Runner, RunnerId, RunRequest } from '../core/runner.ts';
 import { mapAntigravityEvent } from './events/antigravity.ts';
 import { mapClaudeEvent } from './events/claude.ts';
+import { mapCodexEvent } from './events/codex.ts';
 
 const withModel = (model: string | undefined): string[] => (model ? ['--model', model] : []);
+
+export function antigravityLaunch(binary: string, args: readonly string[]): { binary: string; args: string[] } {
+  const bash = process.env['WARBAND_WITHPROXY_BASH'] || (process.platform === 'win32'
+    ? join(process.env['ProgramFiles'] ?? 'C:/Program Files', 'Git', 'bin', 'bash.exe')
+    : 'bash');
+  return {
+    binary: bash,
+    args: [
+      '--noprofile', '--norc', '-c',
+      'source ~/.bashrc >/dev/null && export MSYS2_ARG_CONV_EXCL="*" && withproxy "$@"',
+      'warband-withproxy', binary, ...args,
+    ],
+  };
+}
 
 /**
  * Claude Code tools per access level, passed as `--tools` ("the list of
@@ -86,12 +102,20 @@ export const RUNNER_SPECS: Record<RunnerId, CliRunnerSpec> = {
     displayName: 'Codex',
     binary: 'codex',
     versionArgs: ['--version'],
-    buildArgs: (request) => ['exec', '--json', ...withModel(request.model), request.prompt],
+    mapRaw: mapCodexEvent,
+    promptOnStdin: true,
+    schemaOnDisk: true,
+    buildArgs: (request, schemaFile) => [
+      '-a', 'never', 'exec', '--json', '--ephemeral',
+      '--sandbox', request.access === 'edit' ? 'workspace-write' : 'read-only',
+      ...(schemaFile ? ['--output-schema', schemaFile] : []),
+      ...withModel(request.model), '-',
+    ],
     capabilities: {
       transport: 'stream',
       structuredOutput: true,
       sandbox: 'os',
-      headlessApprovals: 'unknown',
+      headlessApprovals: 'deny',
       verified: false,
     },
   },
@@ -101,6 +125,7 @@ export const RUNNER_SPECS: Record<RunnerId, CliRunnerSpec> = {
     displayName: 'Antigravity',
     binary: 'agy',
     versionArgs: ['--version'],
+    launch: antigravityLaunch,
     mapRaw: mapAntigravityEvent,
     buildArgs: (request) => [
       '-p',
