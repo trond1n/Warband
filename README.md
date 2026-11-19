@@ -96,6 +96,31 @@ To add patterns, write `.warband/protected.json`:
 
 `"defaults": false` replaces the defaults instead of adding to them. Patterns follow `.gitignore` rules: a pattern without `/` matches at any depth, and a leading `/` anchors it to the root.
 
+## Bench
+
+```sh
+warband bench test                    # every task in bench/tasks with /test, once
+warband bench test --tasks review-bug,review-clean --repeat 3
+warband bench --compare bench/results/2026-11-16-1210-test.json bench/results/2026-11-17-0930-test.json
+```
+
+The bench runs a fixed set of small tasks with an agent through every stage. Use it to see whether a change of skill, model or prompt made the agent better or worse.
+
+- **One at a time.** Every run starts from a fresh temporary git repository made from the task's `setup/`.
+- **Checks.** The task's checks replace the agent's hooks.
+- **Gates.** They are answered automatically, and only in those temporary repositories ([ADR-0004](docs/adr/0004-bench-answers-its-own-gates.md)).
+- **Verdict.** Each task's `verify.mjs` decides whether the task passed.
+
+Before it starts, the bench shows the number of runs and the model calls to expect, and it waits for a yes. It writes `bench/results/<date>-<agent>.json` and prints a table of:
+
+- verify;
+- the expected outcome;
+- reworks and the review verdict;
+- protected changes and denied tools;
+- time and model calls.
+
+With `--repeat N` the table shows the share of runs that passed. The eight v1 tasks are partly adapted from [mark2's bench](https://github.com/dream-x/mark2) (MIT). The task format and the tasks themselves are in [bench/README.md](bench/README.md).
+
 ## The window
 
 ```sh

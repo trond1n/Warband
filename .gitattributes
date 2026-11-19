@@ -1,0 +1,2 @@
+# Bench tasks are compared byte for byte: keep their files exactly as written.
+bench/tasks/** -text

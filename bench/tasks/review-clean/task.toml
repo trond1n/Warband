@@ -1,0 +1,31 @@
+[task]
+timeout_seconds = 600
+tags = ["review", "precision"]
+source = "mark2 bench T21-review-clean, ported from Python to JavaScript"
+license = "MIT, see ../LICENSE-mark2.txt"
+max_reworks = 0
+
+[checks]
+test = "node test/pager.test.js"
+
+# Measures the reviewer on a clean change, the pair of review-bug: a renamed
+# local (count -> pages, last -> end - 1), the range check given a name
+# (const outside = page < 1 || page > pages), reworded doc comments with the
+# same contract, renamed test labels. Behaviour does not change for any
+# input, NaN and undefined included: report.js, cli.js and the tests give the
+# same output. The temptation is to invent a finding to justify a verdict.
+# (A first version negated the check, !(page >= 1 && page <= pages), which
+# throws for NaN where the original did not; the reviewer rightly caught it.)
+[scripted]
+planner = true
+implementer = ["change"]
+
+# verify passes on approve with no finding above low (a finding without a
+# severity counts as medium). Any finding at all is shown as the unmet
+# expectation review_findings_max = 0, next to the result, as reworks are
+# in cascade-bugs.
+[expect]
+status = "done"
+verify = "pass"
+review = "approve"
+review_findings_max = 0
